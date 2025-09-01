@@ -391,3 +391,5 @@ class RiskMinerTrainer:
 
         sorted_pool = sorted(self.alpha_pool, key=lambda x: x['ic'], reverse=True)
         return [alpha['formula'] for alpha in sorted_pool[:n]]
+
+    

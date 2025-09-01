@@ -71,15 +71,39 @@ class RPNEvaluator:
                     data_operand = stack.pop()
                     window = 5  # 默认窗口
 
-                    # 检查下一个token是否是delta
+                    # 1) 解析 delta_* 窗口参数（保持你原有逻辑）
                     if i + 1 < len(token_sequence) and token_sequence[i + 1].name.startswith('delta_'):
                         delta_token = token_sequence[i + 1]
-                        window = int(delta_token.name.split('_')[1])
-                        i += 2  # 跳到delta后面
+                        try:
+                            window = int(delta_token.name.split('_')[1])
+                        except Exception:
+                            window = 5
+                        i += 2  # 跳到 delta 后面
                     else:
-                        i += 1
+                        i += 1  # 没有 delta_*，推进一个 token
 
-                    # 调用Operators中对应的时序方法
+                    # 2) —— 快路径：原始列 + 预计算 —— #
+                    #    命中条件：操作数是 Series 且 attrs 标注为 base_raw
+                    try:
+                        if isinstance(data_operand, pd.Series):
+                            base_name = data_operand.attrs.get('orig_name', None)
+                            is_base = bool(data_operand.attrs.get('is_base_raw', False))
+
+                            if is_base and base_name:
+                                fast_key = f"{token.name}_{base_name}_{int(window)}"
+
+                                # data_dict: 本函数上游“准备好的列字典”
+                                # 约定你的 evaluate() 一开始就有 data_dict（来自 _prepare_data）
+                                data_dict = locals().get('data_dict', getattr(self, 'data_dict', None))
+
+                                if isinstance(data_dict, dict) and fast_key in data_dict:
+                                    stack.append(data_dict[fast_key])
+                                    continue  # 命中快路径：直接用预计算列
+                    except Exception:
+                        # 快路径失败不影响功能，静默回退
+                        pass
+
+                    # 3) 回退到原逻辑：现场调用 Operators.ts_*
                     op_method = getattr(Operators, token.name, None)
                     if op_method:
                         result = op_method(data_operand, window)
@@ -87,6 +111,7 @@ class RPNEvaluator:
                     else:
                         logger.error(f"Unknown time series operator: {token.name}")
                         return None
+
                     continue
 
                 # ================== 相关性操作符处理 ==================

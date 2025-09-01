@@ -2,6 +2,12 @@
 from enum import Enum
 import numpy as np
 
+class DataType(Enum):
+    PRICE   = "price"    # open/high/low/close/vwap
+    VOLUME  = "volume"   # volume
+    SCALAR  = "scalar"   # 常数
+    RANKED  = "ranked"   # csrank 或 ts_rank 输出
+    GENERIC = "generic"  # 其他数值
 
 class TokenType(Enum):
     SPECIAL = "special"  # BEG, END
@@ -10,12 +16,13 @@ class TokenType(Enum):
 
 
 class Token:
-    def __init__(self, token_type, name, value=None, arity=0, min_window=None):
+    def __init__(self, token_type, name, value=None, arity=0, min_window=None, dtype=None):
         self.type = token_type
         self.name = name
         self.value = value
         self.arity = arity
         self.min_window = min_window  # 新增：最小窗口要求
+        self.dtype = dtype
 
 
 # Token定义字典
@@ -25,37 +32,37 @@ TOKEN_DEFINITIONS = {
     'END': Token(TokenType.SPECIAL, 'END'),
 
     # 操作数 - 股票特征
-    'open': Token(TokenType.OPERAND, 'open'),
-    'high': Token(TokenType.OPERAND, 'high'),
-    'low': Token(TokenType.OPERAND, 'low'),
-    'close': Token(TokenType.OPERAND, 'close'),
-    'volume': Token(TokenType.OPERAND, 'volume'),
-    'vwap': Token(TokenType.OPERAND, 'vwap'),
+    'open': Token(TokenType.OPERAND, 'open', dtype=DataType.PRICE),
+    'high': Token(TokenType.OPERAND, 'high', dtype=DataType.PRICE),
+    'low': Token(TokenType.OPERAND, 'low', dtype=DataType.PRICE),
+    'close': Token(TokenType.OPERAND, 'close', dtype=DataType.PRICE),
+    'volume': Token(TokenType.OPERAND, 'volume', dtype=DataType.VOLUME),
+    'vwap': Token(TokenType.OPERAND, 'vwap', dtype=DataType.PRICE),
 
     # 操作数 - 时间窗口（7个，用于时序操作）
-    'delta_3': Token(TokenType.OPERAND, 'delta_3', value=3),
-    'delta_5': Token(TokenType.OPERAND, 'delta_5', value=5),
-    'delta_10': Token(TokenType.OPERAND, 'delta_10', value=10),
-    'delta_20': Token(TokenType.OPERAND, 'delta_20', value=20),
-    'delta_30': Token(TokenType.OPERAND, 'delta_30', value=30),
-    'delta_40': Token(TokenType.OPERAND, 'delta_40', value=40),
-    'delta_50': Token(TokenType.OPERAND, 'delta_50', value=50),
-    'delta_60': Token(TokenType.OPERAND, 'delta_60', value=60),
+    'delta_3': Token(TokenType.OPERAND, 'delta_3', value=3,  dtype=DataType.SCALAR),
+    'delta_5': Token(TokenType.OPERAND, 'delta_5', value=5,  dtype=DataType.SCALAR),
+    'delta_10': Token(TokenType.OPERAND, 'delta_10', value=10,  dtype=DataType.SCALAR),
+    'delta_20': Token(TokenType.OPERAND, 'delta_20', value=20,  dtype=DataType.SCALAR),
+    'delta_30': Token(TokenType.OPERAND, 'delta_30', value=30,  dtype=DataType.SCALAR),
+    'delta_40': Token(TokenType.OPERAND, 'delta_40', value=40,  dtype=DataType.SCALAR),
+    'delta_50': Token(TokenType.OPERAND, 'delta_50', value=50,  dtype=DataType.SCALAR),
+    'delta_60': Token(TokenType.OPERAND, 'delta_60', value=60,  dtype=DataType.SCALAR),
 
     # 操作数 - 常数（13个，根据论文Table 3）
-    'const_-30': Token(TokenType.OPERAND, 'const_-30', value=-30.0),
-    'const_-10': Token(TokenType.OPERAND, 'const_-10', value=-10.0),
-    'const_-5': Token(TokenType.OPERAND, 'const_-5', value=-5.0),
-    'const_-2': Token(TokenType.OPERAND, 'const_-2', value=-2.0),
-    'const_-1': Token(TokenType.OPERAND, 'const_-1', value=-1.0),
-    'const_-0.5': Token(TokenType.OPERAND, 'const_-0.5', value=-0.5),
-    'const_-0.01': Token(TokenType.OPERAND, 'const_-0.01', value=-0.01),
-    'const_0.5': Token(TokenType.OPERAND, 'const_0.5', value=0.5),
-    'const_1': Token(TokenType.OPERAND, 'const_1', value=1.0),
-    'const_2': Token(TokenType.OPERAND, 'const_2', value=2.0),
-    'const_5': Token(TokenType.OPERAND, 'const_5', value=5.0),
-    'const_10': Token(TokenType.OPERAND, 'const_10', value=10.0),
-    'const_30': Token(TokenType.OPERAND, 'const_30', value=30.0),
+    'const_-30': Token(TokenType.OPERAND, 'const_-30', value=-30.0,dtype=DataType.SCALAR),
+    'const_-10': Token(TokenType.OPERAND, 'const_-10', value=-10.0,dtype=DataType.SCALAR),
+    'const_-5': Token(TokenType.OPERAND, 'const_-5', value=-5.0,dtype=DataType.SCALAR),
+    'const_-2': Token(TokenType.OPERAND, 'const_-2', value=-2.0,dtype=DataType.SCALAR),
+    'const_-1': Token(TokenType.OPERAND, 'const_-1', value=-1.0,dtype=DataType.SCALAR),
+    'const_-0.5': Token(TokenType.OPERAND, 'const_-0.5', value=-0.5,dtype=DataType.SCALAR),
+    'const_-0.01': Token(TokenType.OPERAND, 'const_-0.01', value=-0.01,dtype=DataType.SCALAR),
+    'const_0.5': Token(TokenType.OPERAND, 'const_0.5', value=0.5,dtype=DataType.SCALAR),
+    'const_1': Token(TokenType.OPERAND, 'const_1', value=1.0,dtype=DataType.SCALAR),
+    'const_2': Token(TokenType.OPERAND, 'const_2', value=2.0,dtype=DataType.SCALAR),
+    'const_5': Token(TokenType.OPERAND, 'const_5', value=5.0,dtype=DataType.SCALAR),
+    'const_10': Token(TokenType.OPERAND, 'const_10', value=10.0,dtype=DataType.SCALAR),
+    'const_30': Token(TokenType.OPERAND, 'const_30', value=30.0,dtype=DataType.SCALAR),
 
     # 一元操作符 - 横截面（4个）
     'sign': Token(TokenType.OPERATOR, 'sign', arity=1),
@@ -98,11 +105,66 @@ TOTAL_TOKENS = len(TOKEN_DEFINITIONS)
 
 
 class RPNValidator:
-    """验证和评估逆波兰表达式"""
+    @staticmethod
+    def _infer_stack_dtypes(token_sequence):
+        """
+        模拟栈，但只推断 dtype（不关心数值）。
+        delta_* 作为参数跳过，corr/cov 视为二元操作。
+        """
+        from core.token_system import TokenType, DataType
+        stack = []
+        i = 1  # 跳过 BEG
+        while i < len(token_sequence):
+            tk = token_sequence[i]
+            if tk.name == 'END':
+                break
+            if tk.type == TokenType.OPERAND:
+                if not tk.name.startswith('delta_'):
+                    stack.append(tk.dtype or DataType.GENERIC)
+                i += 1
+                continue
+
+            # 操作符
+            needs_delta = (tk.name in ['ts_ref', 'ts_rank'] or tk.name.startswith('ts_') or tk.name in ['corr', 'cov'])
+            eff_arity = 2 if tk.name in ['corr', 'cov'] else tk.arity
+            if needs_delta and i + 1 < len(token_sequence) and token_sequence[i + 1].name.startswith('delta_'):
+                i += 1  # 跳过 delta 参数
+
+            if len(stack) < eff_arity:
+                return stack  # 不足，直接返回当前栈
+
+            # 出栈
+            args = [stack.pop() for _ in range(eff_arity)][::-1]
+
+            # 入栈（推断输出类型的简化规则）
+            if tk.name in ['csrank', 'ts_rank']:
+                stack.append(DataType.RANKED)
+            elif tk.name in ['corr', 'cov']:
+                stack.append(DataType.SCALAR)
+            else:
+                # 其他一概视为 GENERIC（简化）
+                stack.append(DataType.GENERIC)
+            i += 1
+        return stack
+
+    @staticmethod
+    def _dtype_check(op_name, stack):
+        """
+        早期剪枝的最小规则：
+        - corr/cov：禁止任一参数是 SCALAR（const），避免 corr(x, const)
+        后续可按需扩展更多规则
+        """
+        from core.token_system import DataType
+        if op_name in ('corr', 'cov'):
+            if len(stack) < 2:
+                return False
+            a, b = stack[-2], stack[-1]
+            if DataType.SCALAR in (a, b):
+                return False
+        return True
 
     @staticmethod
     def is_valid_partial_expression(token_sequence):
-        """检查是否为合法的部分RPN表达式"""
         if not token_sequence or token_sequence[0].name != 'BEG':
             return False
 
@@ -193,6 +255,15 @@ class RPNValidator:
                 if required <= stack_size:
                     valid_tokens.append(token_name)
 
+        typed_stack = RPNValidator._infer_stack_dtypes(token_sequence)
+        filtered = []
+        for name in valid_tokens:
+            tk = TOKEN_DEFINITIONS[name]
+            if tk.type == TokenType.OPERATOR:
+                if not RPNValidator._dtype_check(name, typed_stack):
+                    continue
+            filtered.append(name)
+        valid_tokens = filtered
 
         # END
         if stack_size == 1 and len(token_sequence) >= 2:
