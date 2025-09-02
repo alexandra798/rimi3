@@ -55,6 +55,26 @@ def _preprocess_for_mcts(X: pd.DataFrame) -> pd.DataFrame:
     return Xp
 
 
+def precompute_features(X_data):
+    """预计算常用时序特征，添加到DataFrame中"""
+    base_cols = ['open', 'high', 'low', 'close', 'volume', 'vwap']
+    windows = [3, 5, 10, 20, 30, 40, 50, 60]
+
+    for col in base_cols:
+        if col not in X_data.columns:
+            continue
+
+        for window in windows:
+            # 预计算并存储为新列
+            X_data[f'ts_mean_{col}_{window}'] = X_data[col].rolling(window).mean()
+            X_data[f'ts_std_{col}_{window}'] = X_data[col].rolling(window).std()
+            # 可以添加更多预计算
+
+    # 标记数据ID
+    X_data.attrs['data_id'] = 'train_data_with_features'
+    return X_data
+
+
 def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
                                use_policy_network=True, num_simulations=50,
                                device=None, random_seed=42):
@@ -162,6 +182,8 @@ def main(args):
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, shuffle=False
     )
+    X_train = precompute_features(X_train)
+    X_train.attrs['data_id'] = 'train_sample_v1'
     # === 新增：仅供 MCTS/AlphaPool 使用的去量纲版本 ===
     X_train_mcts = _preprocess_for_mcts(X_train)
     X_test_mcts = _preprocess_for_mcts(X_test) if args.backtest else None

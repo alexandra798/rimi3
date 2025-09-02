@@ -196,19 +196,16 @@ class FormulaEvaluator:
 
     def _prepare_data(self, data: Union[pd.DataFrame, Dict]) -> Optional[Dict]:
         """
-        准备数据为字典格式 - 确保都是 Series，并为“RPN 快路径”做两件事：
-        1) 给基础列 Series 标注 attrs：orig_name / is_base_raw
-        2) 预计算常用窗口的 ts_* 特征，键名形如：ts_mean_close_5
+        准备数据为字典格式 - 保持Series引用不变，避免重复创建
         """
         try:
-            # ------ 统一先转成 {col: Series} ------
             prepared: Dict[str, pd.Series] = {}
 
             if isinstance(data, pd.DataFrame):
-                # DataFrame -> dict('series')
-                prepared = data.to_dict('series')
+                # 关键改动：不用to_dict('series')，直接引用列
+                prepared = {col: data[col] for col in data.columns}
             elif isinstance(data, dict):
-                # 保留你原有的“参考索引 + 转 Series”的逻辑
+                # Dict类型保持原逻辑
                 ref_index = None
                 for value in data.values():
                     if isinstance(value, pd.Series):
@@ -217,7 +214,7 @@ class FormulaEvaluator:
 
                 for key, value in data.items():
                     if isinstance(value, pd.Series):
-                        prepared[key] = value
+                        prepared[key] = value  # 直接引用，不复制
                     elif isinstance(value, np.ndarray):
                         prepared[key] = pd.Series(value, index=ref_index)
                     else:
@@ -225,46 +222,8 @@ class FormulaEvaluator:
             else:
                 logger.error(f"Unsupported data type: {type(data)}")
                 return None
-
-            # ------ 标注基础列属性（供快路径识别“原始列”）------
-            base_cols = ['open', 'high', 'low', 'close', 'volume', 'vwap']
-            for k, s in list(prepared.items()):
-                if isinstance(s, pd.Series):
-                    # 标注“来源列名”
-                    try:
-                        s.attrs['orig_name'] = k
-                        s.attrs['is_base_raw'] = (k in base_cols)
-                    except Exception:
-                        # 某些 Series 可能不支持 attrs，跳过即可
-                        pass
-
-            # ------ 预计算常用窗口（仅对基础列做，以控内存/时间）------
-            # 说明：Operators.ts_* 内部已做 Series 级缓存（attrs['_op_cache']），
-            # 这里的预计算会“热一层”，RPN 快路径可直接取。
-            from core.operators import Operators  # 避免顶部循环依赖
-            win_list = [3, 5, 10, 20, 30, 40, 50, 60]
-
-            for col in base_cols:
-                s = prepared.get(col, None)
-                if not isinstance(s, pd.Series):
-                    continue
-
-                for w in win_list:
-                    key_mean = f'ts_mean_{col}_{w}'
-                    key_std = f'ts_std_{col}_{w}'
-                    key_wma = f'ts_wma_{col}_{w}'
-                    key_ema = f'ts_ema_{col}_{w}'
-
-                    # 避免重复计算：如果键已存在就不覆盖
-                    if key_mean not in prepared:
-                        prepared[key_mean] = Operators.ts_mean(s, w)
-                    if key_std not in prepared:
-                        prepared[key_std] = Operators.ts_std(s, w)
-                    if key_wma not in prepared:
-                        prepared[key_wma] = Operators.ts_wma(s, w)
-                    if key_ema not in prepared:
-                        prepared[key_ema] = Operators.ts_ema(s, w)
-
+            # 移除预计算逻辑，改到数据加载时一次性完成
+            # （预计算移到main.py的数据准备阶段）
             return prepared
 
         except Exception as e:
@@ -341,32 +300,18 @@ class FormulaEvaluator:
         return stack_size == 1  # 完整表达式应该正好留下1个结果
 
     def _generate_cache_key(self, formula: str, data: Any, allow_partial: bool) -> str:
-        """生成缓存键 - 使用数据内容哈希而非id"""
+        """生成缓存键 - 使用数据标识而非内容哈希"""
 
-        import hashlib
-        if isinstance(data, pd.DataFrame):
-            # DataFrame: 使用值和索引的哈希
-            data_hash = hashlib.md5(
-                data.values.tobytes() +
-                str(data.index.tolist()).encode()
-            ).hexdigest()[:8]  # 只取前8位避免太长
-        elif isinstance(data, dict):
-            # Dict: 使用所有值的哈希
-            combined = b''
-            for key in sorted(data.keys()):  # 排序保证一致性
-                value = data[key]
-                if hasattr(value, 'values'):
-                    combined += value.values.tobytes()
-                elif isinstance(value, (list, np.ndarray)):
-                    combined += np.array(value).tobytes()
-                else:
-                    combined += str(value).encode()
-            data_hash = hashlib.md5(combined).hexdigest()[:8]
-        else:
-            # 其他类型：退回到id（向后兼容）
-            data_hash = str(id(data))
+        # 优先使用data的attrs标识
+        data_id = None
+        if hasattr(data, 'attrs') and isinstance(data.attrs, dict):
+            data_id = data.attrs.get('data_id')
 
-        return f"{formula}_{data_hash}_{allow_partial}"
+        # 如果没有attrs标识，使用对象id
+        if data_id is None:
+            data_id = str(id(data))
+
+        return f"{formula}_{data_id}_{allow_partial}"
 
 
     def evaluate_state(self, state, X_data) -> Optional[pd.Series]:

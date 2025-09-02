@@ -71,7 +71,11 @@ class RiskMinerTrainer:
         """主训练循环"""
         for iteration in range(num_iterations):
             logger.info(f"\n=== Iteration {iteration + 1}/{num_iterations} ===")
-            # 每10轮清理一次缓存
+
+            self.reward_calculator.set_iteration_sample(
+                self.X_train_sample, self.y_train_sample
+            )
+
             if iteration > 0 and iteration % 10 == 0:
                 self.formula_evaluator.clear_cache()
                 self.reward_calculator._cache.clear()

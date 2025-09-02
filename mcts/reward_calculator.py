@@ -23,7 +23,7 @@ class RewardCalculator:
     """
 
     def __init__(self, alpha_pool, lambda_param=0.1, sample_size=5000,
-                 pool_size=100, min_std=1e-6, random_seed=42, cache_size=500, lambda_turnover=0.02, lambda_regime=0.10,):
+                 pool_size=100, min_std=1e-6, random_seed=42, cache_size=500, lambda_turnover=0.02, lambda_regime=0.10):
         self.utils_metrics = None
         self.alpha_pool = alpha_pool
         self.lambda_param = lambda_param
@@ -41,6 +41,24 @@ class RewardCalculator:
 
         self.lambda_turnover = lambda_turnover
         self.lambda_regime = lambda_regime
+
+        self.current_sample_indices = None
+        self.current_data_id = None
+
+    def set_iteration_sample(self, X_data, y_data):
+        """每个iteration开始时调用，固定本轮采样"""
+        if len(X_data) > self.sample_size:
+            self.current_sample_indices = self.rng.choice(
+                len(X_data), self.sample_size, replace=False
+            )
+            # 标记数据ID
+            if hasattr(X_data, 'attrs'):
+                self.current_data_id = X_data.attrs.get('data_id', id(X_data))
+            else:
+                self.current_data_id = id(X_data)
+        else:
+            self.current_sample_indices = None
+            self.current_data_id = id(X_data)
 
     def _manage_cache(self):
         """管理缓存大小"""
@@ -128,19 +146,20 @@ class RewardCalculator:
         return {'by_regime': stats, 'var': float(np.var(arr)) if arr.size > 0 else 0.0}
 
     def calculate_intermediate_reward(self, state, X_data, y_data):
-        cache_key = ' '.join([t.name for t in state.token_sequence])
+        cache_key = f"{' '.join([t.name for t in state.token_sequence])}_{self.current_data_id}"
+
         if cache_key in self._cache:
-            self._cache.move_to_end(cache_key)  # LRU更新
+            self._cache.move_to_end(cache_key)
             return self._cache[cache_key]
 
         if not RPNValidator.is_valid_partial_expression(state.token_sequence):
             return -0.1
 
         try:
-            if len(X_data) > self.sample_size:
-                sample_indices = self.rng.choice(len(X_data), self.sample_size, replace=False)
-                X_sample = X_data.iloc[sample_indices] if hasattr(X_data, 'iloc') else X_data[sample_indices]
-                y_sample = y_data.iloc[sample_indices] if hasattr(y_data, 'iloc') else y_data[sample_indices]
+            # 使用固定的采样索引，不再每次随机
+            if self.current_sample_indices is not None:
+                X_sample = X_data.iloc[self.current_sample_indices]
+                y_sample = y_data.iloc[self.current_sample_indices]
             else:
                 X_sample = X_data
                 y_sample = y_data
@@ -348,42 +367,65 @@ class RewardCalculator:
             logger.error(f"Error calculating mutual IC: {e}")
             return 0.0
 
-    def _build_design_matrix(self, alpha_pool_dict, y_series):
-        """
-        alpha_pool_dict: { name: pd.Series(index=y.index) }
-        返回对齐后的 X_mat (n, k) 与 y_vec (n,)
-        """
+    def _build_design_matrix(self, feature_dict, y_series):
+        """统一的设计矩阵构建方法"""
         cols = []
-        for k, s in alpha_pool_dict.items():
-            s = pd.Series(s).rename(k)
-            cols.append(s)
+        for name, series in feature_dict.items():
+            if isinstance(series, pd.Series):
+                cols.append(series.rename(name))
+            else:
+                cols.append(pd.Series(series, name=name))
+
+        # 对齐数据
         df = pd.concat(cols + [pd.Series(y_series).rename("__y__")], axis=1).dropna()
         if df.empty:
             return None, None, []
+
         y_vec = df.pop("__y__").values.astype(float)
         names = list(df.columns)
         X_mat = df.values.astype(float)
         return X_mat, y_vec, names
 
+
     def _calculate_composite_ic(self, X_data, y_data):
         if len(self.alpha_pool) == 0:
             return 0.0
 
-        formulas = [a['formula'] for a in self.alpha_pool if 'formula' in a]
-        X_mat, y_vec = self._build_design_matrix(formulas, X_data, y_data)
+        # 构建设计矩阵，复用已有values
+        feature_dict = {}
+        for alpha in self.alpha_pool:
+            formula = alpha['formula']
+
+            # 优先使用已存储的values
+            if 'values' in alpha and alpha['values'] is not None:
+                feature_dict[formula] = alpha['values']
+            else:
+                # 只在没有values时才评估
+                values = self.formula_evaluator.evaluate(formula, X_data)
+                if values is not None:
+                    alpha['values'] = values  # 存储以供后续复用
+                    feature_dict[formula] = values
+
+        if not feature_dict:
+            return 0.0
+
+        # 构建对齐的设计矩阵
+        X_mat, y_vec, names = self._build_design_matrix(feature_dict, y_data)
         if X_mat is None:
             valid_ic = [a.get('ic', 0.0) for a in self.alpha_pool if 'ic' in a]
             return float(np.mean(valid_ic)) if valid_ic else 0.0
 
-        # 稀疏解
+        # Lasso回归
         self.linear_model = Lasso(alpha=0.001, fit_intercept=False, max_iter=5000)
         self.linear_model.fit(X_mat, y_vec)
 
+        # 更新权重
         weights = self.linear_model.coef_
-        for i, a in enumerate(self.alpha_pool):
+        for i, alpha in enumerate(self.alpha_pool):
             if i < len(weights):
-                a['weight'] = float(weights[i])
+                alpha['weight'] = float(weights[i])
 
+        # 计算合成IC
         pred = self.linear_model.predict(X_mat)
         return float(_utils_ic(pred, y_vec, method='spearman'))
 

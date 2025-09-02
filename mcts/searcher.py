@@ -67,8 +67,7 @@ class MCTSSearcher:
         import time
 
         # 阶段1：选择（Selection）
-        start = time.time()
-        logger.debug("Starting selection phase...")
+
         path = []
         current = root_node
 
@@ -81,14 +80,11 @@ class MCTSSearcher:
 
             # 如果当前序列合法，更新边的中间奖励R(s,a)
             if RPNValidator.is_valid_partial_expression(current.state.token_sequence):
-                logger.debug(f"Calculating intermediate reward for path length {len(path)}...")
-                reward_start = time.time()
                 intermediate_reward = reward_calculator.calculate_intermediate_reward(
                     current.state, X_data, y_data
                 )
-                logger.debug(f"Intermediate reward calculation took {time.time() - reward_start:.2f}s")
                 current.update_intermediate_reward(intermediate_reward)
-        logger.debug(f"Selection phase took {time.time() - start:.2f}s")
+
 
         # 阶段2：扩展（Expansion）
         leaf_value = 0
