@@ -1,4 +1,4 @@
-"""主程序入口 - 支持Token系统和传统系统（改进版）"""
+"""主程序入口"""
 import argparse
 import logging
 import numpy as np
@@ -56,22 +56,50 @@ def _preprocess_for_mcts(X: pd.DataFrame) -> pd.DataFrame:
 
 
 def precompute_features(X_data):
-    """预计算常用时序特征，添加到DataFrame中"""
+    """批量预计算特征，避免DataFrame碎片化"""
     base_cols = ['open', 'high', 'low', 'close', 'volume', 'vwap']
     windows = [3, 5, 10, 20, 30, 40, 50, 60]
 
+    # 标注基础列的元信息（供evaluator快路径识别）
+    for col in base_cols:
+        if col in X_data.columns:
+            try:
+                X_data[col].attrs['is_base_raw'] = True
+                X_data[col].attrs['orig_name'] = col
+            except Exception:
+                pass
+
+    # 批量构建新列
+    new_cols = {}
     for col in base_cols:
         if col not in X_data.columns:
             continue
+        s = X_data[col]
 
         for window in windows:
-            # 预计算并存储为新列
-            X_data[f'ts_mean_{col}_{window}'] = X_data[col].rolling(window).mean()
-            X_data[f'ts_std_{col}_{window}'] = X_data[col].rolling(window).std()
-            # 可以添加更多预计算
+            # 计算滚动特征
+            mean_col = s.rolling(window=window, min_periods=1).mean()
+            std_col = s.rolling(window=window, min_periods=min(3, window)).std()
+
+            mean_name = f'ts_mean_{col}_{window}'
+            std_name = f'ts_std_{col}_{window}'
+
+            mean_col.name = mean_name
+            std_col.name = std_name
+
+            new_cols[mean_name] = mean_col
+            new_cols[std_name] = std_col
+
+    # 一次性concat所有新列，避免碎片化
+    if new_cols:
+        X_data = pd.concat([X_data] + list(new_cols.values()), axis=1, copy=False)
 
     # 标记数据ID
-    X_data.attrs['data_id'] = 'train_data_with_features'
+    try:
+        X_data.attrs['data_id'] = 'train_data_with_features'
+    except Exception:
+        pass
+
     return X_data
 
 
@@ -79,15 +107,6 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
                                use_policy_network=True, num_simulations=50,
                                device=None, random_seed=42):
     """
-    使用新的Token系统运行MCTS
-    Args:
-        X_train: 训练数据特征
-        y_train: 训练数据标签
-        num_iterations: 训练迭代次数
-        use_policy_network: 是否使用策略网络
-        num_simulations: 每次迭代的模拟次数
-        device: torch设备(cuda或cpu)
-
     Returns:
         (top_formulas, trainer):
         top_formulas 为 [(formula, ic/score), ...]
@@ -96,7 +115,6 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
     logger.info("Starting MCTS with Token System")
     logger.info(f"Data size: {len(X_train)} rows")
 
-    # 创建训练器
     trainer = RiskMinerTrainer(X_train, y_train, device=device, use_sampling=True, random_seed=random_seed)
 
     # 训练
@@ -104,7 +122,6 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
         num_iterations=num_iterations,
         num_simulations_per_iteration=num_simulations
     )
-
     # 获取最佳公式
     top_formulas = trainer.get_top_formulas(n=5)
 
@@ -120,17 +137,11 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
                 result.append((formula, 0.0))
         else:
             result.append((formula, 0.0))
-
     return result, trainer
 
 
 def main(args):
-    logger.info("Starting RiMi Algorithm")
-
-    if args.use_token_system:
-        logger.info("=== Using Token-based RPN System ===")
-    else:
-        logger.info("=== Using Legacy System ===")
+    logger.info("Starting Rimi3")
 
     # 设置GPU设备
     if torch.cuda.is_available():
@@ -148,7 +159,6 @@ def main(args):
     # 第1部分：数据准备和探索
     logger.info("=== Part 1: Data Preparation & Exploration ===")
 
-    # 加载原始数据
     X, y, all_features = load_user_dataset(args.data_path, args.target_column)
     logger.info(f"Initial data shape: X={X.shape}, y={y.shape}")
 
@@ -193,18 +203,14 @@ def main(args):
     # 第2-4部分：MCTS和Alpha池管理
     logger.info("=== Parts 2-4: MCTS & Alpha Pool Management ===")
 
-    if args.use_risk_seeking:
-        logger.info("Using Token system with Risk Seeking Policy Network")
-        best_formulas_quantile, trainer = run_mcts_with_token_system(
-            X_train_mcts, y_train,
-            num_iterations=MCTS_CONFIG['num_iterations'],
-            num_simulations=50,
-            device=device,
-            random_seed=42
-        )
-    else:
-        logger.info("Using Token system without Policy Network")
-        best_formulas_quantile, trainer = [], None
+    logger.info("Using Token system with Risk Seeking Policy Network")
+    best_formulas_quantile, trainer = run_mcts_with_token_system(
+        X_train_mcts, y_train,
+        num_iterations=MCTS_CONFIG['num_iterations'],
+        num_simulations=50,
+        device=device,
+        random_seed=42
+    )
 
     evaluate_formula = FormulaEvaluator()
 
@@ -225,9 +231,11 @@ def main(args):
 
         # 使用与训练相同的采样集更新池
         if args.use_risk_seeking and hasattr(trainer, 'X_train_sample'):
-            # 如果MCTS使用了采样，池更新也用相同的采样集
-            X_pool_update = _preprocess_for_mcts(trainer.X_train_sample)
-            y_pool_update = trainer.y_train
+            # 如果 MCTS 使用了采样，池更新也用完全相同的采样集与口径
+            # 注意：trainer.X_train_sample 已经是预处理后的版本，无需再次 preprocess
+            X_pool_update = trainer.X_train_sample
+            y_pool_update = trainer.y_train_sample
+
         else:
             X_pool_update = X_train_mcts
             y_pool_update = y_train
@@ -254,7 +262,6 @@ def main(args):
         transformed_X = apply_alphas_and_return_transformed(X, top_formulas, evaluate_formula)
         logger.info(f"Transformed dataset shape: {transformed_X.shape}")
 
-        # 可选：保存转换后的数据
         if args.save_transformed:
             output_path = args.output_path or "transformed_data.csv"
             logger.info(f"Saving transformed data to {output_path}")
@@ -307,11 +314,11 @@ def main(args):
                 for formula, ic in sorted_results:
                     f.write(f"Formula: {formula}, IC: {ic:.4f}\n")
 
-    logger.info("RiskMiner completed successfully!")
+    logger.info("Rimi3 completed successfully!")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="RiskMiner Algorithm")
+    parser = argparse.ArgumentParser(description="Rimi3")
 
     parser.add_argument(
         "--data_path",
@@ -325,16 +332,7 @@ if __name__ == "__main__":
         default="target",
         help="Name of the target column"
     )
-    parser.add_argument(
-        "--use_token_system",
-        action="store_true",
-        help="Use the new Token-based RPN system instead of legacy string generation"
-    )
-    parser.add_argument(
-        "--use_risk_seeking",
-        action="store_true",
-        help="Use risk-seeking MCTS with policy network"
-    )
+
     parser.add_argument(
         "--transform_data",
         action="store_true",

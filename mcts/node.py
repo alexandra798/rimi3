@@ -77,9 +77,13 @@ class MCTSNode:
         self.R = reward
 
     # 重要
-    def get_best_child(self, c_puct=None):
+    def get_best_child(self, c_puct=None, diversity_penalty_func=None):
         """
-        使用论文中的PUCT公式选择最佳子节点
+        使用论文中的PUCT公式选择最佳子节点，可选加入多样性惩罚
+
+        Args:
+            c_puct: 探索系数
+            diversity_penalty_func: 多样性惩罚函数，接受 child 节点返回惩罚值
         """
         if not self.children:
             return None
@@ -89,7 +93,7 @@ class MCTSNode:
         # 计算母节点总访问次数
         total_visits = sum(child.N for child in self.children.values())
 
-        #新：首次访问，优先选择 P 有效且最大的；否则随机一个
+        # 首次访问，优先选择 P 有效且最大的；否则随机一个
         if total_visits == 0:
             valid_children = [ch for ch in self.children.values()
                               if np.isfinite(ch.P) and ch.P > 0.0]
@@ -98,12 +102,7 @@ class MCTSNode:
                 return random.choice(list(self.children.values()))
             return max(valid_children, key=lambda ch: ch.P)
 
-        # 旧：特殊情况：首次访问，选择先验概率最高的
-        # if total_visits == 0:
-            # return max(self.children.values(), key=lambda child: child.P)
-
         sqrt_total = math.sqrt(total_visits)
-
         best_value = -float('inf')
         best_child = None
 
@@ -118,27 +117,19 @@ class MCTSNode:
             if not (np.isfinite(p_value) and p_value > 0.0):
                 p_value = 1.0 / len(self.children)
 
+            # 计算 U 值
             u_value = c * p_value * sqrt_total / (1.0 + child.N)
+
+            # 应用多样性惩罚（如果提供）
+            if diversity_penalty_func:
+                u_value -= diversity_penalty_func(child)
+
+            # PUCT 值
             puct_value = q_value + u_value
 
             if puct_value > best_value:
                 best_value = puct_value
                 best_child = child
-
-        #for action, child in self.children.items():
-            # Q值：平均奖励（exploitation）
-            #q_value = child.Q
-
-            # U值：探索奖励（exploration）
-            # P(s,a) * sqrt(parent_visits) / (1 + child_visits)
-            #u_value = c * child.P * sqrt_total / (1.0 + child.N)
-
-            # PUCT值
-            #puct_value = q_value + u_value
-
-            #if puct_value > best_value:
-                #best_value = puct_value
-                #best_child = child
 
         return best_child
 

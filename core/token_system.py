@@ -169,39 +169,37 @@ class RPNValidator:
             return False
 
         stack_size = 0
-        i = 1  # 跳过BEG
+        used_operator = False
+        i = 1
 
         while i < len(token_sequence):
-            token = token_sequence[i]
+            tk = token_sequence[i]
+            if tk.name == 'END':
+                # 只有出现过至少一个运算符、且栈==1 才视作"已形成有效子式"
+                return used_operator and (stack_size == 1)
 
-            if token.name == 'END':
-                return stack_size == 1
-
-            if token.type == TokenType.OPERAND:
-                # delta不入栈（作为参数）
-                if not token.name.startswith('delta_'):
+            if tk.type == TokenType.OPERAND:
+                if not tk.name.startswith('delta_'):
                     stack_size += 1
-            elif token.type == TokenType.OPERATOR:
-                needs_delta = (token.name in ['ts_ref', 'ts_rank'] or token.name.startswith('ts_')
-                               or token.name in ['corr', 'cov'])
+            elif tk.type == TokenType.OPERATOR:
+                used_operator = True
+                needs_delta = (tk.name in ['ts_ref', 'ts_rank'] or tk.name.startswith('ts_')
+                               or tk.name in ['corr', 'cov'])
                 if needs_delta:
-                    # 这些操作符需要delta参数
                     if i + 1 < len(token_sequence) and token_sequence[i + 1].name.startswith('delta_'):
-                        i += 1  # 跳过 delta
-                    # 有效 arity：corr/cov 视为 2
-                    eff_arity = 2 if token.name in ['corr', 'cov'] else token.arity
+                        i += 1
+                    eff_arity = 2 if tk.name in ['corr', 'cov'] else tk.arity
                     if stack_size < eff_arity:
-                            return False
+                        return False
                     stack_size = stack_size - eff_arity + 1
                 else:
-                    # 普通操作符
-                    if stack_size < token.arity:
+                    if stack_size < tk.arity:
                         return False
-                    stack_size = stack_size - token.arity + 1
-
+                    stack_size = stack_size - tk.arity + 1
             i += 1
 
-        return stack_size >= 1
+        # 允许作为"部分可评估"的条件：至少用过一个运算符，且栈>=1
+        return used_operator and (stack_size >= 1)
 
     @staticmethod
     def get_valid_next_tokens(token_sequence):
@@ -210,31 +208,26 @@ class RPNValidator:
             return ['BEG']
 
         if len(token_sequence) >= 30:
-            # 只有表达式真正完成时才允许END
             if RPNValidator.can_terminate(token_sequence):
                 return ['END']
             else:
-                # 无法终止，返回空列表强制结束episode
                 return []
 
         last_token = token_sequence[-1] if token_sequence else None
 
-        # 如果最后一个是需要时间参数的操作符
+        # 时序操作符特殊处理
         time_ops = ['ts_ref', 'ts_rank', 'ts_mean', 'ts_med', 'ts_sum', 'ts_std',
                     'ts_var', 'ts_max', 'ts_min', 'ts_skew', 'ts_kurt',
                     'ts_wma', 'ts_ema', 'corr', 'cov']
 
         if last_token and last_token.name in time_ops:
-            # 只返回满足最小窗口要求的delta
             valid_deltas = []
             min_window = TOKEN_DEFINITIONS[last_token.name].min_window
-
             for delta_name in ['delta_3', 'delta_5', 'delta_10', 'delta_20',
                                'delta_30', 'delta_40', 'delta_50', 'delta_60']:
                 delta_value = TOKEN_DEFINITIONS[delta_name].value
                 if delta_value >= min_window:
                     valid_deltas.append(delta_name)
-
             return valid_deltas
 
         # 计算当前栈大小
@@ -255,18 +248,39 @@ class RPNValidator:
                 if required <= stack_size:
                     valid_tokens.append(token_name)
 
+        # 类型检查和约束过滤
         typed_stack = RPNValidator._infer_stack_dtypes(token_sequence)
+
+        # 定义辅助函数
+        def _is_ts_op(name):
+            return (name in ['ts_ref', 'ts_rank'] or name.startswith('ts_') or name in ['corr', 'cov'])
+
+        last_names = [t.name for t in token_sequence[-3:]] if token_sequence else []
+        ts_count = sum(1 for t in token_sequence if _is_ts_op(t.name))
+
+        # 过滤约束
         filtered = []
         for name in valid_tokens:
+            # 禁止连续 ts_ref
+            if name == 'ts_ref' and (last_names and last_names[-1] == 'ts_ref'):
+                continue
+
+            # 限制时序操作总数（最多 3 次）
+            if _is_ts_op(name) and ts_count >= 3:
+                continue
+
+            # dtype 校验
             tk = TOKEN_DEFINITIONS[name]
-            if tk.type == TokenType.OPERATOR:
-                if not RPNValidator._dtype_check(name, typed_stack):
-                    continue
+            if tk.type == TokenType.OPERATOR and not RPNValidator._dtype_check(name, typed_stack):
+                continue
+
             filtered.append(name)
+
         valid_tokens = filtered
 
-        # END
-        if stack_size == 1 and len(token_sequence) >= 2:
+        # END 仅对"已用过≥1个运算符且栈==1"开放
+        used_operator = any(t.type == TokenType.OPERATOR for t in token_sequence)
+        if used_operator and stack_size == 1:
             valid_tokens.append('END')
 
         return valid_tokens

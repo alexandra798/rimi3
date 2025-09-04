@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 class RPNEvaluator:
     """评估RPN表达式的值"""
 
+
     @staticmethod
     def evaluate(token_sequence, data_dict, allow_partial=True):
         """
@@ -199,48 +200,20 @@ class RPNEvaluator:
                 elif data_length:
                     return np.full(data_length, result)
             return result
+
         else:
             # 部分表达式的情况
             if allow_partial:
-                # 对于部分表达式，返回栈顶元素或组合多个元素
+                # 返回栈顶元素（最新的子表达式）
                 result = stack[-1]
 
-                # 如果有多个元素，可以尝试组合它们
-                if len(stack) > 1:
-                    logger.debug(f"Partial expression with {len(stack)} stack elements")
-                    # 尝试将所有栈元素平均（这是一种启发式方法）
-                    try:
-                        arrays = []
-                        for elem in stack:
-                            if isinstance(elem, pd.Series):
-                                arrays.append(elem.values)
-                            elif isinstance(elem, np.ndarray):
-                                arrays.append(elem)
-                            else:
-                                # 标量，扩展为数组
-                                if data_length:
-                                    arrays.append(np.full(data_length, elem))
-                                else:
-                                    arrays.append(np.array([elem]))
-
-                        # 计算平均值作为部分表达式的估值
-                        result_array = np.mean(arrays, axis=0)
-
-                        if data_index is not None:
-                            return pd.Series(result_array, index=data_index)
-                        else:
-                            return result_array
-                    except Exception as e:
-                        logger.debug(f"Failed to combine stack elements: {e}")
-                        # 失败时返回栈顶元素
-                        pass
-
-                # 返回结果
+                # 如果是标量，展开为与数据长度一致的Series/数组
                 if isinstance(result, (int, float, np.number)):
                     if data_length and data_index is not None:
                         return pd.Series(result, index=data_index)
                     elif data_length:
                         return np.full(data_length, result)
+
                 return result
             else:
                 # 不允许部分表达式时报错

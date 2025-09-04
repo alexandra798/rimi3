@@ -61,19 +61,29 @@ class MCTSSearcher:
         except Exception:
             return None
 
+    def _diversity_penalty(self, node, beta=0.1):
+        """计算节点的多样性惩罚"""
+        if not hasattr(node, 'state') or not node.state:
+            return 0.0
+
+        key = self._hash_seq(node.state.token_sequence)
+        freq = self.subtree_counter.get(key, 0)
+        # 使用对数惩罚，避免过度惩罚
+        return beta * np.log(1 + freq)
 
     def search_one_iteration(self, root_node, mdp_env, reward_calculator, X_data, y_data):
-        #执行一次完整的MCTS迭代
-        import time
-
+        # 执行一次完整的MCTS迭代
         # 阶段1：选择（Selection）
-
         path = []
         current = root_node
 
-        # 使用固定的c_puct进行PUCT选择
+        # 使用固定的c_puct和多样性惩罚进行PUCT选择
         while current.is_expanded() and not current.is_terminal():
-            current = current.get_best_child(c_puct=self.c_puct)  # 使用固定值
+            # 传入多样性惩罚函数
+            current = current.get_best_child(
+                c_puct=self.c_puct,
+                diversity_penalty_func=lambda child: self._diversity_penalty(child, beta=0.1)
+            )
             if current is None:
                 break
             path.append(current)

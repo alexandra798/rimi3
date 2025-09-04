@@ -280,13 +280,12 @@ class RiskMinerTrainer:
         return state.token_sequence
 
     def update_alpha_pool(self, trajectories, iteration):
-        """更新Alpha池 - 使用一致的采样数据"""
+        """更新Alpha池 - 冷启动期间放宽门槛"""
         new_formulas = []
         constant_count = 0
 
-        # 使用训练时的采样数据（保持一致）
-        X_sample = self.X_train_sample  # 修改点：使用相同的采样
-        y_sample = self.y_train_sample  # 修改点：使用相同的采样
+        X_sample = self.X_train_sample
+        y_sample = self.y_train_sample
 
         for trajectory in trajectories:
             if not trajectory:
@@ -297,26 +296,31 @@ class RiskMinerTrainer:
             for state, action, reward in trajectory:
                 final_state.add_token(action)
 
-            # 检查是否以END结束
+            # 检查是否正确终止
             if final_state.token_sequence[-1].name == 'END':
                 formula_rpn = ' '.join([t.name for t in final_state.token_sequence])
                 alpha_values = self.formula_evaluator.evaluate(formula_rpn, X_sample)
 
                 if alpha_values is not None and not alpha_values.isna().all():
-                    # 常数检测
+                    # 检查常数
                     valid_values = alpha_values.dropna()
                     if len(valid_values) > 10:
                         std = valid_values.std()
                         if std < 1e-6:
                             constant_count += 1
-                            logger.debug(f"Skipping constant formula: {formula_rpn[:50]}...")
+                            logger.debug(f"Skipping constant formula")
                             continue
 
-                    # 计算IC - 使用采样数据
-                    ic = self.reward_calculator.calculate_ic(alpha_values, self.y_train_sample)
+                    # 计算IC
+                    ic = self.reward_calculator.calculate_ic(alpha_values, y_sample)
 
-                    # 只添加高质量公式
-                    if abs(ic) >= 0.01:
+                    # 冷启动：前3轮放宽标准，只要IC非零且非常数就入池
+                    if iteration < 3:
+                        min_ic_threshold = 0.005  # 冷启动期更低的阈值
+                    else:
+                        min_ic_threshold = 0.01  # 正常阈值
+
+                    if abs(ic) >= min_ic_threshold:
                         new_formulas.append({
                             'formula': formula_rpn,
                             'ic': ic,
@@ -324,21 +328,20 @@ class RiskMinerTrainer:
                             'iteration': iteration
                         })
 
-        # 添加新公式到池中
+        # 添加到池中
         for formula_info in new_formulas:
             exists = any(a['formula'] == formula_info['formula'] for a in self.alpha_pool)
             if not exists:
                 self.alpha_pool.append(formula_info)
-                logger.info(f"New valid formula: {formula_info['formula'][:50]}... IC={formula_info['ic']:.4f}")
+                logger.info(f"New formula added: IC={formula_info['ic']:.4f}")
 
-        # 保持池大小
+        # 维护池大小
         if len(self.alpha_pool) > 100:
-            # 移除IC最低的
             self.alpha_pool.sort(key=lambda x: abs(x['ic']), reverse=True)
             self.alpha_pool = self.alpha_pool[:100]
 
         if constant_count > 0:
-            logger.info(f"Filtered out {constant_count} constant formulas in iteration {iteration}")
+            logger.info(f"Filtered {constant_count} constant formulas")
 
 
     def print_statistics(self):

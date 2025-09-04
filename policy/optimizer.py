@@ -14,8 +14,8 @@ class RiskSeekingOptimizer:
     def __init__(self, policy_network, quantile_alpha=0.85, device=None):
         self.policy_network = policy_network
         self.quantile_alpha = quantile_alpha  # 目标分位数
-        self.quantile_estimate = -1.0  # 当前分位数估计
-        self.beta = 0.01  # 分位数更新学习率
+        self.quantile_estimate = 0.0  # 改为从0开始，不是-1
+        self.beta = 0.05  # 提高学习率，原来是0.01
         self.device = device if device else torch.device('cpu')
         self.gamma = 1.0
 
@@ -35,77 +35,95 @@ class RiskSeekingOptimizer:
 
     def train_on_episode(self, episode_trajectory, gamma=None):
         """
-        Args: episode_trajectory: [(state, action, reward), ...]
-        Returns: (updated: bool, loss_value: float)
+        根据定理 4.1：仅对 R ≤ q 的轨迹施加负梯度（压低其概率）
+
+        Args:
+            episode_trajectory: [(state, action, reward), ...]
+        Returns:
+            (updated: bool, loss_value: float)
         """
         if gamma is None:
             gamma = self.gamma
 
+        # 计算总回报
         total_reward = sum([r for _, _, r in episode_trajectory])
+
+        # 更新分位数估计
         self.update_quantile(total_reward)
 
-        # 只有当奖励超过分位数时才更新（风险寻优）
+        # 定理 4.1：仅对 R ≤ q 的轨迹施加负梯度，否则不更新
         if total_reward > self.quantile_estimate:
-            states_enc, actions_idx, masks, lengths = [], [], [], []
+            return False, 0.0
 
-            for state, action, _ in episode_trajectory:
-                pre_state = state
-                if len(pre_state.token_sequence) >= 2 and pre_state.token_sequence[-1].name == action:
-                    pre_state = pre_state.copy()
-                    pre_state.token_sequence.pop()
-                    pre_state.step_count = max(0, pre_state.step_count - 1)
-                    from core import RPNValidator
-                    pre_state.stack_size = RPNValidator.calculate_stack_size(pre_state.token_sequence)
+        # 准备训练数据
+        states_enc, actions_idx, masks, lengths = [], [], [], []
 
-                from core import RPNValidator, TOKEN_TO_INDEX
-                valid_tokens = RPNValidator.get_valid_next_tokens(pre_state.token_sequence)
-                if action not in valid_tokens:
-                    import logging
-                    logging.debug(f"Skip illegal pair in training: action={action}, valid={valid_tokens}")
-                    continue
+        for state, action, _ in episode_trajectory:
+            # 确保 state 是执行 action 之前的状态
+            pre_state = state
+            if len(pre_state.token_sequence) >= 2 and pre_state.token_sequence[-1].name == action:
+                pre_state = pre_state.copy()
+                pre_state.token_sequence.pop()
+                pre_state.step_count = max(0, pre_state.step_count - 1)
+                from core import RPNValidator
+                pre_state.stack_size = RPNValidator.calculate_stack_size(pre_state.token_sequence)
 
-                states_enc.append(pre_state.encode_for_network())
-                actions_idx.append(TOKEN_TO_INDEX[action])
+            # 验证动作合法性
+            from core import RPNValidator, TOKEN_TO_INDEX
+            valid_tokens = RPNValidator.get_valid_next_tokens(pre_state.token_sequence)
+            if action not in valid_tokens:
+                import logging
+                logging.debug(f"Skip illegal pair in training: action={action}, valid={valid_tokens}")
+                continue
 
-                row_mask = [False] * len(TOKEN_TO_INDEX)
-                for name in valid_tokens:
-                    row_mask[TOKEN_TO_INDEX[name]] = True
-                masks.append(row_mask)
-                lengths.append(min(len(pre_state.token_sequence), 30))
+            # 收集数据
+            states_enc.append(pre_state.encode_for_network())
+            actions_idx.append(TOKEN_TO_INDEX[action])
 
-            if not states_enc:
-                return False, 0.0
+            # 创建合法动作掩码
+            row_mask = [False] * len(TOKEN_TO_INDEX)
+            for name in valid_tokens:
+                row_mask[TOKEN_TO_INDEX[name]] = True
+            masks.append(row_mask)
+            lengths.append(min(len(pre_state.token_sequence), 30))
 
-            import numpy as np, torch
-            states_tensor = torch.as_tensor(np.array(states_enc), dtype=torch.float32, device=self.device)
-            actions_tensor = torch.as_tensor(actions_idx, dtype=torch.long, device=self.device)
-            masks_tensor = torch.as_tensor(masks, dtype=torch.bool, device=self.device)
-            lengths_tensor = torch.as_tensor(lengths, dtype=torch.long, device=self.device)
+        if not states_enc:
+            return False, 0.0
 
-            action_probs, log_probs = self.policy_network(
-                states_tensor,
-                valid_actions_mask=masks_tensor,
-                lengths=lengths_tensor,
-                return_log_probs=True
-            )
+        # 转换为张量
+        import numpy as np, torch
+        states_tensor = torch.as_tensor(np.array(states_enc), dtype=torch.float32, device=self.device)
+        actions_tensor = torch.as_tensor(actions_idx, dtype=torch.long, device=self.device)
+        masks_tensor = torch.as_tensor(masks, dtype=torch.bool, device=self.device)
+        lengths_tensor = torch.as_tensor(lengths, dtype=torch.long, device=self.device)
 
-            chosen_log_probs = log_probs.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
-            if not torch.isfinite(chosen_log_probs).all():
-                bad = (~torch.isfinite(chosen_log_probs)).nonzero(as_tuple=False).squeeze(-1).tolist()
-                raise RuntimeError(f"Chosen log-prob is not finite at indices {bad}")
+        # 前向传播
+        action_probs, log_probs = self.policy_network(
+            states_tensor,
+            valid_actions_mask=masks_tensor,
+            lengths=lengths_tensor,
+            return_log_probs=True
+        )
 
-            # 最大似然：最小化 -sum(log p(a|s))
-            loss = -chosen_log_probs.sum()
+        # 获取选择动作的对数概率
+        chosen_log_probs = log_probs.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), 0.5)
-            self.optimizer.step()
+        # 检查数值稳定性
+        if not torch.isfinite(chosen_log_probs).all():
+            bad = (~torch.isfinite(chosen_log_probs)).nonzero(as_tuple=False).squeeze(-1).tolist()
+            raise RuntimeError(f"Chosen log-prob is not finite at indices {bad}")
 
-            return True, float(loss.item())
+        # 损失函数：最小化差轨迹的对数概率（等价于压低其概率）
+        # 注意这里是正号，因为我们要最小化log π，从而压低概率
+        loss = chosen_log_probs.sum()
 
-        return False, 0.0
+        # 反向传播
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), 0.5)
+        self.optimizer.step()
 
+        return True, float(loss.item())
 
     def supervised_update(self, batch):
         """
