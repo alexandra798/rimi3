@@ -37,31 +37,6 @@ class FormulaEvaluator:
         self._cache_hits = 0
         self._cache_misses = 0
 
-    def precompute_features(self, data):
-        """预计算常用的时序特征"""
-        if not self.enable_precompute:
-            return
-
-        base_cols = ['open', 'high', 'low', 'close', 'volume', 'vwap']
-        windows = [3, 5, 10, 20, 30, 40, 50, 60]
-        ops = ['ts_mean', 'ts_std', 'ts_wma', 'ts_ema', 'ts_max', 'ts_min']
-
-        for col in base_cols:
-            if col in data:
-                for window in windows:
-                    for op in ops:
-                        feature_name = f"{op}_{col}_{window}"
-                        if op == 'ts_mean':
-                            self.precomputed_features[feature_name] = data[col].rolling(window).mean()
-                        elif op == 'ts_std':
-                            self.precomputed_features[feature_name] = data[col].rolling(window).std()
-                        elif op == 'ts_max':
-                            self.precomputed_features[feature_name] = data[col].rolling(window).max()
-                        elif op == 'ts_min':
-                            self.precomputed_features[feature_name] = data[col].rolling(window).min()
-                        # ... 其他操作符
-
-        logger.info(f"Precomputed {len(self.precomputed_features)} features")
 
 
 
@@ -301,7 +276,6 @@ class FormulaEvaluator:
 
     def _generate_cache_key(self, formula: str, data: Any, allow_partial: bool) -> str:
         """生成缓存键 - 使用数据标识而非内容哈希"""
-
         # 优先使用data的attrs标识
         data_id = None
         if hasattr(data, 'attrs') and isinstance(data.attrs, dict):
