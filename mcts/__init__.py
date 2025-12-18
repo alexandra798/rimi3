@@ -1,4 +1,9 @@
-"""MCTS模块"""
+"""
+MCTS module entry point.
+
+This package exposes the core components required to construct and run
+Monte Carlo Tree Search (MCTS) for alpha mining.
+"""
 from .node import MCTSNode
 from .searcher import MCTSSearcher
 from .environment import AlphaMiningMDP, MDPState
