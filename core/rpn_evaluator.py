@@ -1,4 +1,4 @@
-"""RPN表达式求值器 - 调用统一的Operators类"""
+"""RPN evaluator - dispatches to the unified Operators class."""
 import numpy as np
 import pandas as pd
 import logging
@@ -9,23 +9,25 @@ logger = logging.getLogger(__name__)
 
 
 class RPNEvaluator:
-    """评估RPN表达式的值"""
-
+    """Evaluate RPN expressions into Series/arrays using the Operators registry."""
 
     @staticmethod
     def evaluate(token_sequence, data_dict, allow_partial=True):
         """
-        评估RPN表达式 支持部分表达式
+        Evaluate an RPN expression, with optional partial-expression support.
+
         Args:
-            token_sequence: Token序列
-            data_dict: 数据字典
-            allow_partial: 是否允许部分表达式（栈中有多个元素）
+            token_sequence: List of Token objects representing the expression.
+            data_dict: Dict[str, Series/ndarray], mapping variable names to data columns.
+            allow_partial: If True, return the top of the stack when expression is partial.
+
         Returns:
-            评估结果（Series或数组）
+            pandas.Series, numpy.ndarray, or scalar expanded to Series/array length.
+            Returns None on structural errors (e.g., insufficient operands).
         """
         stack = []
 
-        # 获取数据长度和索引
+        # Determine data length and index (for broadcasting scalars into Series)
         data_length = None
         data_index = None
         for key, value in data_dict.items():
@@ -37,7 +39,7 @@ class RPNEvaluator:
                     data_length = len(value)
                 break
 
-        i = 1  # 跳过BEG
+        i = 1  # Skip BEG
         while i < len(token_sequence):
             token = token_sequence[i]
 
@@ -45,46 +47,45 @@ class RPNEvaluator:
                 break
 
             if token.type == TokenType.OPERAND:
-                # 处理操作数
+                # Operand handling
                 if token.name in data_dict:
                     stack.append(data_dict[token.name])
                 elif token.name.startswith('const_'):
                     const_value = float(token.name.split('_')[1])
-                    # 始终创建 Series
+                    # Always create a Series if shape info is available
                     if data_index is not None:
                         stack.append(pd.Series(const_value, index=data_index))
                     elif data_length:
-                        # 即使没有索引，也创建 Series
+                        # Create Series even without explicit index
                         stack.append(pd.Series([const_value] * data_length))
                     else:
                         stack.append(const_value)
                 elif token.name.startswith('delta_'):
-                    # delta不应该单独出现，跳过
+                    # delta_* should not appear alone; it will be consumed by the next operator
                     pass
 
             elif token.type == TokenType.OPERATOR:
-                # ================== 时序操作符处理 ==================
+                # ================== Time-series operators ==================
                 if token.name.startswith('ts_'):
                     if len(stack) < 1:
                         logger.error(f"Insufficient operands for {token.name}")
                         return None
 
                     data_operand = stack.pop()
-                    window = 5  # 默认窗口
+                    window = 5  # Default window
 
-                    # 1) 解析 delta_* 窗口参数（保持你原有逻辑）
+                    # 1) Parse following delta_* as window parameter (if any)
                     if i + 1 < len(token_sequence) and token_sequence[i + 1].name.startswith('delta_'):
                         delta_token = token_sequence[i + 1]
                         try:
                             window = int(delta_token.name.split('_')[1])
                         except Exception:
                             window = 5
-                        i += 2  # 跳到 delta 后面
+                        i += 2  # Skip past delta_*
                     else:
-                        i += 1  # 没有 delta_*，推进一个 token
+                        i += 1  # No delta_*, advance by one
 
-                    # 2) —— 快路径：原始列 + 预计算 —— #
-                    #    命中条件：操作数是 Series 且 attrs 标注为 base_raw
+                    # 2) Fast path: use precomputed columns (if Series marked as base raw)
                     try:
                         if isinstance(data_operand, pd.Series):
                             base_name = data_operand.attrs.get('orig_name', None)
@@ -93,18 +94,17 @@ class RPNEvaluator:
                             if is_base and base_name:
                                 fast_key = f"{token.name}_{base_name}_{int(window)}"
 
-                                # data_dict: 本函数上游“准备好的列字典”
-                                # 约定你的 evaluate() 一开始就有 data_dict（来自 _prepare_data）
+                                # Upstream convention: a prepared `data_dict` may contain precomputed columns
                                 data_dict = locals().get('data_dict', getattr(self, 'data_dict', None))
 
                                 if isinstance(data_dict, dict) and fast_key in data_dict:
                                     stack.append(data_dict[fast_key])
-                                    continue  # 命中快路径：直接用预计算列
+                                    continue  # Fast-path hit: reuse precomputed column
                     except Exception:
-                        # 快路径失败不影响功能，静默回退
+                        # Any failure on the fast path silently falls back
                         pass
 
-                    # 3) 回退到原逻辑：现场调用 Operators.ts_*
+                    # 3) Fallback: call Operators.ts_* at runtime
                     op_method = getattr(Operators, token.name, None)
                     if op_method:
                         result = op_method(data_operand, window)
@@ -115,7 +115,7 @@ class RPNEvaluator:
 
                     continue
 
-                # ================== 相关性操作符处理 ==================
+                # ================== Correlation-like operators ==================
                 elif token.name in ('corr', 'cov'):
                     if len(stack) < 2:
                         logger.error(f"Insufficient operands for {token.name}")
@@ -124,28 +124,27 @@ class RPNEvaluator:
                     y = stack.pop()
                     x = stack.pop()
 
-                    window = 5  # 默认窗口
+                    window = 5  # Default window
                     if i + 1 < len(token_sequence) and token_sequence[i + 1].name.startswith('delta_'):
                         delta_token = token_sequence[i + 1]
                         window = int(delta_token.name.split('_')[1])
-                        i += 2  # 跳过操作符后的 delta_*
+                        i += 2  # Skip delta_* after operator
                     else:
                         i += 1
 
-                    # 调用Operators中的corr或cov方法
+                    # Dispatch to Operators.corr or Operators.cov
                     op_method = getattr(Operators, token.name)
                     result = op_method(x, y, window)
                     stack.append(result)
                     continue
 
-                # ================== 一元操作符处理 ==================
+                # ================== Unary operators ==================
                 elif token.arity == 1:
                     if len(stack) < 1:
                         logger.error(f"Insufficient operands for {token.name}")
                         return None
                     operand = stack.pop()
 
-                    # 调用Operators中对应的一元方法
                     op_method = getattr(Operators, token.name, None)
                     if op_method:
                         result = op_method(operand, data_length, data_index)
@@ -154,7 +153,7 @@ class RPNEvaluator:
                         logger.error(f"Unknown unary operator: {token.name}")
                         return None
 
-                # ================== 二元操作符处理 ==================
+                # ================== Binary operators ==================
                 elif token.arity == 2:
                     if len(stack) < 2:
                         logger.error(f"Insufficient operands for {token.name}")
@@ -162,7 +161,6 @@ class RPNEvaluator:
                     operand2 = stack.pop()
                     operand1 = stack.pop()
 
-                    # 调用Operators中对应的二元方法
                     op_method = getattr(Operators, token.name, None)
                     if op_method:
                         result = op_method(operand1, operand2, data_length, data_index)
@@ -171,7 +169,7 @@ class RPNEvaluator:
                         logger.error(f"Unknown binary operator: {token.name}")
                         return None
 
-                # ================== 三元操作符处理 ==================
+                # ================== Ternary operators (not used currently) ==================
                 elif token.arity == 3:
                     if len(stack) < 3:
                         logger.error(f"Insufficient operands for {token.name}")
@@ -180,19 +178,18 @@ class RPNEvaluator:
                     operand2 = stack.pop()
                     operand1 = stack.pop()
 
-                    # 注意：目前系统中没有真正的三元操作符
-                    # corr和cov已经在上面处理了
+                    # There are no true ternary operators at present (corr/cov handled above).
                     logger.error(f"Unexpected ternary operator: {token.name}")
                     return None
 
             i += 1
 
-        # 返回结果处理
+        # ---------------------- Return handling ----------------------
         if len(stack) == 0:
             logger.error("Empty stack after evaluation")
             return None
         elif len(stack) == 1:
-            # 完整表达式的正常情况
+            # Normal case for a complete expression
             result = stack[0]
             if isinstance(result, (int, float, np.number)):
                 if data_length and data_index is not None:
@@ -202,21 +199,18 @@ class RPNEvaluator:
             return result
 
         else:
-            # 部分表达式的情况
+            # Partial-expression case
             if allow_partial:
-                # 返回栈顶元素（最新的子表达式）
                 result = stack[-1]
-
-                # 如果是标量，展开为与数据长度一致的Series/数组
+                # Broadcast scalar to Series/array length if possible
                 if isinstance(result, (int, float, np.number)):
                     if data_length and data_index is not None:
                         return pd.Series(result, index=data_index)
                     elif data_length:
                         return np.full(data_length, result)
-
                 return result
             else:
-                # 不允许部分表达式时报错
+                # Not allowed to return partial results
                 logger.error(f"Stack has {len(stack)} elements after evaluation, expected 1")
                 logger.error(f"Stack content: {[type(x) for x in stack]}")
                 logger.error(f"RPN expression: {' '.join([t.name for t in token_sequence])}")
