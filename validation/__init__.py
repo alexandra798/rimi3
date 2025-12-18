@@ -1,4 +1,4 @@
-"""验证模块"""
+"""validation module"""
 from .cross_validation import cross_validate_formulas, evaluate_formula_cross_val
 from .backtest import backtest_formulas
 
