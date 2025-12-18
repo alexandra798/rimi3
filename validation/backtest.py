@@ -1,4 +1,4 @@
-"""回测模块 - validation/backtest.py"""
+"""Backtesting module"""
 import pandas as pd
 import numpy as np
 from scipy.stats import spearmanr
@@ -13,29 +13,29 @@ logger = logging.getLogger(__name__)
 
 def backtest_formulas(formulas, X_test, y_test):
     """
-    回测已发现的公式
+    Backtest discovered formulas.
 
     Parameters:
-    - formulas: 要测试的公式列表
-    - X_test: 测试特征数据
-    - y_test: 测试目标数据
+    - formulas: List of formulas to evaluate.
+    - X_test: Test feature data.
+    - y_test: Test target data.
 
     Returns:
-    - results: 公式及其IC值的字典
+    - results: Dict mapping formula -> IC value.
     """
     evaluator = FormulaEvaluator()
     results = {}
 
     for formula in formulas:
-        # 使用统一的评估函数
+        # Evaluate using the unified evaluator.
         feature = evaluator.evaluate(formula, X_test)
 
-        # 对齐数据
+        # Align and clean data.
         valid_indices = ~(feature.isna() | y_test.isna())
         feature_clean = feature[valid_indices]
         y_test_clean = y_test[valid_indices]
 
-        # 计算IC
+        # Compute IC.
         if len(feature_clean) > 1:
             ic, _ = spearmanr(feature_clean, y_test_clean)
             results[formula] = ic if not np.isnan(ic) else 0
@@ -46,25 +46,25 @@ def backtest_formulas(formulas, X_test, y_test):
     return results
 
 
-# validation/backtest.py 新增
+# Added in validation/backtest.py
 def backtest_with_trading_simulation(formulas, X_test, y_test, price_data,
                                      top_k=40, rebalance_freq=5,
                                      initial_capital=1000000):
     """
-    论文5.3节的完整交易模拟
+    Full trading simulation from Section 5.3 of the paper.
 
     Parameters:
-    - formulas: alpha公式列表
-    - X_test: 测试特征数据
-    - y_test: 实际收益率
-    - price_data: 包含价格信息的DataFrame
-    - top_k: 每次选择的股票数量
-    - rebalance_freq: 重新平衡频率（天）
-    - initial_capital: 初始资金
+    - formulas: List of alpha formulas.
+    - X_test: Test feature data.
+    - y_test: Realized returns (ground truth).
+    - price_data: DataFrame containing price information.
+    - top_k: Number of stocks selected at each rebalance.
+    - rebalance_freq: Rebalance frequency in days.
+    - initial_capital: Starting capital.
     """
     evaluator = FormulaEvaluator()
 
-    # 获取时间索引（稳健支持 MultiIndex 或列字段）
+    # Get the date index (robustly supports MultiIndex or explicit columns).
     if isinstance(X_test.index, pd.MultiIndex) and {'date', 'ticker'}.issubset(set(X_test.index.names)):
         dates = X_test.index.get_level_values('date').unique().sort_values()
 
@@ -91,10 +91,10 @@ def backtest_with_trading_simulation(formulas, X_test, y_test, price_data,
             return df_day[df_day['ticker'] == t]
 
     portfolio_values = [initial_capital]
-    holdings = {}  # 当前持仓
+    holdings = {}  # Current holdings (ticker -> shares).
 
     def get_close(price_df, d, t):
-        # 稳健取 close，兼容 MultiIndex 或列字段
+        # Robust close-price lookup (supports MultiIndex or explicit columns).
         if isinstance(price_df.index, pd.MultiIndex) and {'date', 'ticker'}.issubset(set(price_df.index.names)):
             return float(price_df.loc[(d, t), 'close'])
         elif {'date', 'ticker', 'close'}.issubset(set(price_df.columns)):
@@ -106,16 +106,16 @@ def backtest_with_trading_simulation(formulas, X_test, y_test, price_data,
             raise ValueError("price_data 需为 MultiIndex(date,ticker) 或包含 date/ticker/close 列")
 
     for i, date in enumerate(dates):
-        # 每rebalance_freq天重新平衡
+        # Rebalance every `rebalance_freq` days.
         if i % rebalance_freq == 0:
-            # 计算所有股票的alpha信号
+            # Compute alpha signals for all tickers on this day.
             daily_data = get_daily_data(X_test, date)
 
             alpha_scores = {}
             for ticker in tickers_of(daily_data):
                 ticker_data = slice_ticker(daily_data, ticker)
 
-                # 使用所有公式的平均信号
+                # Use the average signal across all formulas.
                 scores = []
                 for formula in formulas:
                     score = evaluator.evaluate(formula, ticker_data)
@@ -126,9 +126,9 @@ def backtest_with_trading_simulation(formulas, X_test, y_test, price_data,
                 if scores:
                     alpha_scores[ticker] = np.mean(scores)
 
-            # 选择top-k股票
+            # Select top-k tickers.
             if not alpha_scores:
-                portfolio_values.append(portfolio_values[-1])  # 无信号，持仓不变
+                portfolio_values.append(portfolio_values[-1])  # No signal: keep holdings/value unchanged.
                 continue
 
             sorted_tickers = sorted(alpha_scores.items(), key=lambda x: x[1], reverse=True)
@@ -138,25 +138,25 @@ def backtest_with_trading_simulation(formulas, X_test, y_test, price_data,
                 portfolio_values.append(portfolio_values[-1])
                 continue
 
-            # 计算每只股票的投资金额（等权重）
+            # Equal-weight position sizing.
             current_value = portfolio_values[-1]
             position_size = current_value / len(selected_tickers)
 
-            # 更新持仓
+            # Update holdings.
             new_holdings = {}
             for ticker in selected_tickers:
                 try:
-                    # 获取当前价格
+                    # Get current price.
                     current_price = get_close(price_data, date, ticker)
                     shares = position_size / current_price
                     new_holdings[ticker] = shares
                 except Exception as e:
                     logger.warning(f"Price missing for {ticker} @ {date}: {e}")
-                    # 跳过无法获取价格的股票
+                    # Skip tickers with missing prices.
 
             holdings = new_holdings
 
-        # 计算当日组合价值
+        # Compute daily portfolio value.
         daily_value = 0
         for ticker, shares in holdings.items():
             try:
@@ -164,20 +164,20 @@ def backtest_with_trading_simulation(formulas, X_test, y_test, price_data,
                 daily_value += shares * current_price
             except Exception as e:
                 logger.warning(f"Price missing @ {date} {ticker}: {e}")
-                daily_value = portfolio_values[-1]  # 保持前一日价值
+                daily_value = portfolio_values[-1]  # Fall back to previous day's value.
 
         if daily_value == 0:
-            daily_value = portfolio_values[-1]  # 保持前一日价值
+            daily_value = portfolio_values[-1]  # Fall back to previous day's value.
 
         portfolio_values.append(daily_value)
 
-    # 计算性能指标
+    # Performance metrics.
     portfolio_returns = np.diff(portfolio_values) / np.asarray(portfolio_values[:-1], dtype=float)
 
-    # 累积收益率
+    # Cumulative return.
     cumulative_return = (portfolio_values[-1] / portfolio_values[0]) - 1
 
-    # 使用统一的指标函数
+    # Use unified metric helpers.
     sharpe_ratio = calculate_sharpe_ratio(portfolio_returns, risk_free_rate=0.0, periods=252)
     max_drawdown = calculate_max_drawdown(np.asarray(portfolio_values, dtype=float))
 
