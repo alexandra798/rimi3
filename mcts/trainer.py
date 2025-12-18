@@ -1,4 +1,14 @@
-"""RiskMiner完整训练器"""
+# mcts/trainer.py
+"""
+RiskMiner full trainer
+
+This trainer orchestrates:
+- MCTS trajectory collection in an alpha-mining MDP
+- Risk-seeking policy optimization (online RL-style updates)
+- Optional supervised distillation from root visit distributions (imitation)
+- Alpha pool maintenance and periodic statistics reporting
+"""
+
 import logging
 import numpy as np
 import sys
@@ -27,11 +37,14 @@ class RiskMinerTrainer:
         self.y_data = y_data
         self.use_sampling = use_sampling
 
+        # Supervised-learning buffer for distillation:
+        # each item is (state_encoding, actions, pi) where pi is the normalized visit distribution at root
         self.sl_buffer = [] # [(state_enc, actions, pi)]
 
-        self.sl_batch_size = 64  # 每次蒸馏的样本量
+        # Batch size for each supervised distillation step
+        self.sl_batch_size = 64  # number of samples per distillation update
 
-        # 如果数据太大，创建采样版本用于训练
+        # If the dataset is large, create a fixed subsample for MCTS training
         if use_sampling and len(X_data) > sample_size:
             logger.info(f"Data too large ({len(X_data)} rows), creating sampled version...")
             np.random.seed(random_seed)
@@ -43,24 +56,24 @@ class RiskMinerTrainer:
             self.X_train_sample = X_data
             self.y_train_sample = y_data
 
-        # 设置设备
+        # Set device (GPU if available, else CPU)
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = device
 
-        # 初始化组件
+        # Initialize core components
         self.mdp_env = AlphaMiningMDP()
         self.policy_network = PolicyNetwork().to(self.device)
         self.optimizer = RiskSeekingOptimizer(self.policy_network, device=self.device)
         self.mcts_searcher = MCTSSearcher(
             policy_network=self.policy_network,
             device=self.device,
-            c_puct=1.414  # 使用固定的c_puct值
+            c_puct=1.414  # fixed c_puct
         )
         self.alpha_pool = []
         self.reward_calculator = RewardCalculator(self.alpha_pool, random_seed=random_seed)
-        self.formula_evaluator = FormulaEvaluator()  # 使用统一的评估器
+        self.formula_evaluator = FormulaEvaluator()  # unified evaluator instance
 
         logger.info(f"Policy network moved to {self.device}")
 
@@ -68,31 +81,33 @@ class RiskMinerTrainer:
 
 
     def train(self, num_iterations=200, num_simulations_per_iteration=50):
-        """主训练循环"""
+        """Main training loop."""
         for iteration in range(num_iterations):
             logger.info(f"\n=== Iteration {iteration + 1}/{num_iterations} ===")
 
+            # Fix the sample for this iteration (stabilizes reward + caching behavior)
             self.reward_calculator.set_iteration_sample(
                 self.X_train_sample, self.y_train_sample
             )
 
+            # Periodically clear caches to reduce memory usage / stale entries
             if iteration > 0 and iteration % 10 == 0:
                 self.formula_evaluator.clear_cache()
                 self.reward_calculator._cache.clear()
                 logger.info("Cleared caches to free memory")
 
-            # 阶段1：MCTS搜索收集轨迹
+            # Phase 1: collect trajectories via MCTS
             trajectories = self.collect_trajectories_with_mcts(
                 num_episodes=10,
                 num_simulations_per_episode=num_simulations_per_iteration
             )
 
-            # 阶段2：使用收集的轨迹训练策略网络
+            # Phase 2: train policy network using collected trajectories
             if self.optimizer and trajectories:
                 avg_loss = self.train_policy_network(trajectories)
                 logger.info(f"Policy network loss: {avg_loss:.4f}")
 
-            # 阶段2后，追加监督蒸馏
+            # After phase 2: additional supervised distillation from root visit distribution
             if hasattr(self, 'sl_buffer') and len(self.sl_buffer) >= self.sl_batch_size:
                 sl_batch = self.sl_buffer[:self.sl_batch_size]
                 del self.sl_buffer[:self.sl_batch_size]
@@ -100,10 +115,10 @@ class RiskMinerTrainer:
                     sl_loss = self.optimizer.supervised_update(sl_batch)
                     logger.info(f"Supervised distillation loss: {sl_loss:.4f}")
 
-            # 阶段3：评估和更新Alpha池
+            # Phase 3: evaluate trajectories and update alpha pool
             self.update_alpha_pool(trajectories, iteration)
 
-            # 打印统计信息
+            # Print periodic statistics
             if (iteration + 1) % 10 == 0:
                 self.print_statistics()
 
@@ -111,17 +126,17 @@ class RiskMinerTrainer:
 
 
     def search_one_iteration(self, root):
-        """执行一次MCTS搜索迭代"""
+        """Run a single MCTS search iteration from the given root node."""
         return self.mcts_searcher.search_one_iteration(
             root_node=root,
             mdp_env=self.mdp_env,
             reward_calculator=self.reward_calculator,
-            X_data=self.X_train_sample,  # 使用采样集而非全量
-            y_data=self.y_train_sample  # 使用采样集而非全量
+            X_data=self.X_train_sample,  # use sampled dataset (not full) for speed
+            y_data=self.y_train_sample  # use sampled dataset (not full) for speed
         )
 
     def collect_trajectories_with_mcts(self, num_episodes, num_simulations_per_episode):
-        """使用MCTS收集训练轨迹"""
+        """Collect training trajectories using MCTS."""
         all_trajectories = []
 
         for episode in range(num_episodes):
@@ -129,13 +144,13 @@ class RiskMinerTrainer:
             initial_state = self.mdp_env.reset()
             root = MCTSNode(state=initial_state)
 
-            # 执行MCTS搜索
+            # Run MCTS simulations for this episode
             for sim in range(num_simulations_per_episode):
                 if sim % 10 == 0:
                     logger.debug(f"  Simulation {sim}/{num_simulations_per_episode}")
                 trajectory = self.search_one_iteration(root)
 
-            # 提取访问分布用于监督学习
+            # Extract root visit distribution for supervised imitation learning (distillation)
             if root.children:
                 actions, visits = root.get_visit_distribution()
                 if actions and visits:
@@ -146,7 +161,7 @@ class RiskMinerTrainer:
                         state_enc = root.state.encode_for_network()
                         self.sl_buffer.append((state_enc, actions, pi))
 
-            # 提取最佳轨迹
+            # Extract a best trajectory from the built search tree
             final_trajectory = self.extract_best_trajectory(root)
             if final_trajectory:
                 all_trajectories.append(final_trajectory)
@@ -157,7 +172,7 @@ class RiskMinerTrainer:
         return all_trajectories
 
     def train_policy_network(self, trajectories):
-        """训练策略网络"""
+        """Train the policy network on collected episode trajectories."""
         if not self.optimizer:
             return 0.0
 
@@ -179,7 +194,16 @@ class RiskMinerTrainer:
         return avg_loss
 
     def extract_best_trajectory(self, root):
-        """从MCTS树中提取最佳轨迹"""
+        """
+        Extract a "best" trajectory from an MCTS tree.
+
+        Selection rule:
+        - At each step, choose the child with the highest visit count N.
+
+        Additional safety:
+        - Verify actions are still valid under current state's RPN constraints before appending.
+        - Try to complete the formula with required delta_* parameters and END when possible.
+        """
         trajectory = []
         current = root
         max_depth = 30
@@ -187,7 +211,7 @@ class RiskMinerTrainer:
         from core import RPNValidator
 
         while current.children and not current.is_terminal() and depth < max_depth:
-            # 选择访问次数最多的子节点
+            # Choose the most-visited child
             best_action = None
             best_visits = -1
             for action, child in current.children.items():
@@ -199,7 +223,7 @@ class RiskMinerTrainer:
             if best_action is None:
                 break
 
-            # 计算这一步的奖励
+            # Compute reward for this step (terminal vs intermediate)
             if best_child.state.token_sequence[-1].name == 'END':
                 reward = self.reward_calculator.calculate_terminal_reward(
                     best_child.state, self.X_train_sample, self.y_train_sample
@@ -212,7 +236,7 @@ class RiskMinerTrainer:
 
             valid_now = RPNValidator.get_valid_next_tokens(current.state.token_sequence)
             if best_action not in valid_now:
-                # 非法动作，停止添加
+                # Illegal action detected: stop building the trajectory
                 logger.debug(f"Illegal action {best_action} detected, stopping trajectory")
                 break
 
@@ -220,12 +244,12 @@ class RiskMinerTrainer:
             current = best_child
             depth += 1
 
+        # If not terminal yet, attempt to complete the expression when possible
         if not current.is_terminal() and depth < max_depth:
             valid_actions = RPNValidator.get_valid_next_tokens(current.state.token_sequence)
 
-            # 检查是否需要补充delta参数
+            # If only delta_* tokens are valid next actions, add an appropriate delta to satisfy min window constraints
             if valid_actions and all(a.startswith('delta_') for a in valid_actions):
-                # 选择满足最小窗口要求的delta
                 last_token = current.state.token_sequence[-1]
                 min_window = TOKEN_DEFINITIONS[last_token.name].min_window or 3
 
@@ -237,16 +261,16 @@ class RiskMinerTrainer:
                         break
 
                 if suitable_delta:
-                    # 添加delta
+                    # Add delta
                     delta_state = current.state.copy()
                     delta_state.add_token(suitable_delta)
                     delta_reward = self.reward_calculator.calculate_intermediate_reward(
                         delta_state, self.X_train_sample, self.y_train_sample
                     )
                     trajectory.append((current.state, suitable_delta, delta_reward))
-                    # 不要改变current的类型，使用delta_state作为新的状态
+                    # Keep current node type unchanged; use delta_state as a new state for termination checks
 
-                    # 现在尝试添加END，使用delta_state而不是current
+                    # Attempt to add END using delta_state
                     if RPNValidator.can_terminate(delta_state.token_sequence):
                         terminal_state = delta_state.copy()
                         terminal_state.add_token('END')
@@ -255,7 +279,7 @@ class RiskMinerTrainer:
                         )
                         trajectory.append((delta_state, 'END', terminal_reward))
                 else:
-                    # 如果没有delta，直接检查current.state
+                    # If no suitable delta exists, attempt to terminate directly from current.state
                     if RPNValidator.can_terminate(current.state.token_sequence):
                         terminal_state = current.state.copy()
                         terminal_state.add_token('END')
@@ -267,20 +291,25 @@ class RiskMinerTrainer:
         return trajectory
 
     def get_formula_from_trajectory(self, trajectory):
-        """从轨迹中获取公式字符串"""
+        """Convert a trajectory into its token sequence (formula representation)."""
         if not trajectory:
             return None
 
-        # 构建完整状态
+        # Rebuild a complete state by replaying actions
         state = MDPState()
         for s, action, r in trajectory:
             state.add_token(action)
 
-        # 转换为可读公式
+        # Return a readable representation (currently returns the token list, not a joined string)
         return state.token_sequence
 
     def update_alpha_pool(self, trajectories, iteration):
-        """更新Alpha池 - 冷启动期间放宽门槛"""
+        """
+        Update alpha pool.
+
+        Cold-start policy:
+        - For the first few iterations, use a lower IC threshold so the pool can grow.
+        """
         new_formulas = []
         constant_count = 0
 
@@ -291,18 +320,18 @@ class RiskMinerTrainer:
             if not trajectory:
                 continue
 
-            # 构建完整状态
+            # Rebuild the final state by replaying actions
             final_state = MDPState()
             for state, action, reward in trajectory:
                 final_state.add_token(action)
 
-            # 检查是否正确终止
+            # Only consider properly terminated formulas
             if final_state.token_sequence[-1].name == 'END':
                 formula_rpn = ' '.join([t.name for t in final_state.token_sequence])
                 alpha_values = self.formula_evaluator.evaluate(formula_rpn, X_sample)
 
                 if alpha_values is not None and not alpha_values.isna().all():
-                    # 检查常数
+                    # Filter constant-like formulas
                     valid_values = alpha_values.dropna()
                     if len(valid_values) > 10:
                         std = valid_values.std()
@@ -311,14 +340,14 @@ class RiskMinerTrainer:
                             logger.debug(f"Skipping constant formula")
                             continue
 
-                    # 计算IC
+                    # Compute IC for the candidate alpha
                     ic = self.reward_calculator.calculate_ic(alpha_values, y_sample)
 
-                    # 冷启动：前3轮放宽标准，只要IC非零且非常数就入池
+                    # Cold-start: relaxed threshold for first 3 iterations
                     if iteration < 3:
-                        min_ic_threshold = 0.005  # 冷启动期更低的阈值
+                        min_ic_threshold = 0.005
                     else:
-                        min_ic_threshold = 0.01  # 正常阈值
+                        min_ic_threshold = 0.01
 
                     if abs(ic) >= min_ic_threshold:
                         new_formulas.append({
@@ -328,14 +357,14 @@ class RiskMinerTrainer:
                             'iteration': iteration
                         })
 
-        # 添加到池中
+        # Add new formulas to the pool (deduplicated by formula string)
         for formula_info in new_formulas:
             exists = any(a['formula'] == formula_info['formula'] for a in self.alpha_pool)
             if not exists:
                 self.alpha_pool.append(formula_info)
                 logger.info(f"New formula added: IC={formula_info['ic']:.4f}")
 
-        # 维护池大小
+        # Maintain pool size
         if len(self.alpha_pool) > 100:
             self.alpha_pool.sort(key=lambda x: abs(x['ic']), reverse=True)
             self.alpha_pool = self.alpha_pool[:100]
@@ -345,21 +374,21 @@ class RiskMinerTrainer:
 
 
     def print_statistics(self):
-        """打印增强的训练统计信息"""
+        """Print enhanced training statistics."""
         logger.info("\n" + "=" * 60)
         logger.info("Training Statistics")
         logger.info("=" * 60)
 
-        # Alpha池统计
+        # Alpha pool stats
         logger.info(f"Alpha pool size: {len(self.alpha_pool)}")
 
         if self.alpha_pool:
-            # IC分布
+            # IC distribution
             ics = [a.get('ic', 0) for a in self.alpha_pool]
             logger.info(f"IC distribution: mean={np.mean(ics):.4f}, std={np.std(ics):.4f}")
             logger.info(f"IC range: [{np.min(ics):.4f}, {np.max(ics):.4f}]")
 
-            # Top 5 Alphas
+            # Top 5 alphas by absolute IC
             top_5 = sorted(self.alpha_pool, key=lambda x: abs(x['ic']), reverse=True)[:5]
             logger.info("\nTop 5 Alphas by |IC|:")
             for i, alpha in enumerate(top_5, 1):
@@ -368,22 +397,22 @@ class RiskMinerTrainer:
                     formula = formula[:57] + "..."
                 logger.info(f"  {i}. IC={alpha['ic']:+.4f} | {formula}")
 
-        # 缓存统计
+        # Cache stats (if evaluator exposes hit/miss counters)
         if hasattr(self.formula_evaluator, '_cache_hits'):
             total_calls = self.formula_evaluator._cache_hits + self.formula_evaluator._cache_misses
             if total_calls > 0:
                 hit_rate = self.formula_evaluator._cache_hits / total_calls * 100
                 logger.info(f"\nCache hit rate: {hit_rate:.1f}% ({self.formula_evaluator._cache_hits}/{total_calls})")
 
-        # 常数过滤统计
+        # Constant-filter diagnostics
         if hasattr(self.reward_calculator, 'constant_penalty_count'):
             logger.info(f"Constants filtered: {self.reward_calculator.constant_penalty_count}")
 
-        # 分位数估计
+        # Quantile estimate from risk-seeking optimizer
         if self.optimizer:
             logger.info(f"Quantile estimate: {self.optimizer.quantile_estimate:.4f}")
 
-        # 多样性统计
+        # Diversity stats from subtree counter
         if hasattr(self.mcts_searcher, 'subtree_counter'):
             unique_subtrees = len(self.mcts_searcher.subtree_counter)
             max_freq = max(self.mcts_searcher.subtree_counter.values()) if self.mcts_searcher.subtree_counter else 0
@@ -392,11 +421,9 @@ class RiskMinerTrainer:
         logger.info("=" * 60 + "\n")
 
     def get_top_formulas(self, n=5):
-        """获取最佳的n个公式"""
+        """Return the top-n formulas ranked by IC (descending)."""
         if not self.alpha_pool:
             return []
 
         sorted_pool = sorted(self.alpha_pool, key=lambda x: x['ic'], reverse=True)
         return [alpha['formula'] for alpha in sorted_pool[:n]]
-
-    
