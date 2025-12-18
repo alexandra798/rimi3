@@ -1,4 +1,4 @@
-"""主程序入口"""
+"""Main entry point"""
 import argparse
 import logging
 import numpy as np
@@ -24,7 +24,7 @@ from validation.cross_validation import cross_validate_formulas
 from validation.backtest import backtest_formulas
 from mcts.trainer import RiskMinerTrainer
 
-# 设置日志
+# Logging setup.
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -33,20 +33,23 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings('ignore', category=ConstantInputWarning)
 
 def _preprocess_for_mcts(X: pd.DataFrame) -> pd.DataFrame:
-    """对每列做 log1p + z-score；仅用于 MCTS/AlphaPool 的输入，不改动原始 X"""
+    """Apply log1p + z-score per column.
+
+    Used only as input for MCTS/AlphaPool. The original X is not modified.
+    """
     Xp = X.copy()
     numeric_cols = Xp.select_dtypes(include=[np.number]).columns
 
-    # 1. 截断极端值
+    # 1) Clip extreme values.
     Xp[numeric_cols] = np.clip(Xp[numeric_cols], a_min=-1e6, a_max=1e6)
 
-    # 2. log变换（对正值特征如volume）
+    # 2) Log transform (for positive-scale features like volume).
     for col in ['volume', 'vwap']:
         if col in numeric_cols:
             Xp[col] = np.log1p(np.abs(Xp[col]))
 
-    # 3. 标准化
-    with np.errstate(all='ignore'):  # 抑制中间计算警告
+    # 3) Standardization.
+    with np.errstate(all='ignore'):  # Suppress intermediate computation warnings.
         mean = Xp[numeric_cols].mean(axis=0)
         std = Xp[numeric_cols].std(axis=0)
         std_safe = std.replace(0, 1.0)
@@ -56,11 +59,11 @@ def _preprocess_for_mcts(X: pd.DataFrame) -> pd.DataFrame:
 
 
 def precompute_features(X_data):
-    """批量预计算特征，避免DataFrame碎片化"""
+    """Precompute features in batch to avoid DataFrame fragmentation."""
     base_cols = ['open', 'high', 'low', 'close', 'volume', 'vwap']
     windows = [3, 5, 10, 20, 30, 40, 50, 60]
 
-    # 标注基础列的元信息（供evaluator快路径识别）
+    # Mark base columns with metadata (for evaluator fast-path detection).
     for col in base_cols:
         if col in X_data.columns:
             try:
@@ -69,7 +72,7 @@ def precompute_features(X_data):
             except Exception:
                 pass
 
-    # 批量构建新列
+    # Build new columns in a single batch.
     new_cols = {}
     for col in base_cols:
         if col not in X_data.columns:
@@ -77,7 +80,7 @@ def precompute_features(X_data):
         s = X_data[col]
 
         for window in windows:
-            # 计算滚动特征
+            # Rolling features.
             mean_col = s.rolling(window=window, min_periods=1).mean()
             std_col = s.rolling(window=window, min_periods=min(3, window)).std()
 
@@ -90,11 +93,11 @@ def precompute_features(X_data):
             new_cols[mean_name] = mean_col
             new_cols[std_name] = std_col
 
-    # 一次性concat所有新列，避免碎片化
+    # Concatenate all new columns at once to avoid fragmentation.
     if new_cols:
         X_data = pd.concat([X_data] + list(new_cols.values()), axis=1, copy=False)
 
-    # 标记数据ID
+    # Tag data identity.
     try:
         X_data.attrs['data_id'] = 'train_data_with_features'
     except Exception:
@@ -109,26 +112,26 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
     """
     Returns:
         (top_formulas, trainer):
-        top_formulas 为 [(formula, ic/score), ...]
-        trainer 为 RiskMinerTrainer 实例（含 X_train_sample / y_train 等）
+        top_formulas is [(formula, ic/score), ...]
+        trainer is a RiskMinerTrainer instance (contains X_train_sample / y_train, etc.)
     """
     logger.info("Starting MCTS with Token System")
     logger.info(f"Data size: {len(X_train)} rows")
 
     trainer = RiskMinerTrainer(X_train, y_train, device=device, use_sampling=True, random_seed=random_seed)
 
-    # 训练
+    # Train.
     trainer.train(
         num_iterations=num_iterations,
         num_simulations_per_iteration=num_simulations
     )
-    # 获取最佳公式
+    # Get the best formulas.
     top_formulas = trainer.get_top_formulas(n=5)
 
-    # 转换为兼容格式（formula, score）
+    # Convert to a compatible (formula, score) format.
     result = []
     for formula in top_formulas:
-        # 计算IC作为分数
+        # Use IC as the score.
         if trainer.alpha_pool:
             matching_alpha = next((a for a in trainer.alpha_pool if a['formula'] == formula), None)
             if matching_alpha:
@@ -143,7 +146,7 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
 def main(args):
     logger.info("Starting Rimi3")
 
-    # 设置GPU设备
+    # Configure GPU device.
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.gpu_id}")
         logger.info(f"Using GPU: {torch.cuda.get_device_name(device)}")
@@ -156,7 +159,7 @@ def main(args):
         if not torch.cuda.is_available():
             logger.warning("CUDA is not available, using CPU instead")
 
-    # 第1部分：数据准备和探索
+    # Part 1: data preparation and exploration.
     logger.info("=== Part 1: Data Preparation & Exploration ===")
 
     X, y, all_features = load_user_dataset(args.data_path, args.target_column)
@@ -188,19 +191,19 @@ def main(args):
     logger.info(f"Target distribution: mean={y.mean():.4f}, std={y.std():.4f}")
     logger.info(f"Samples with target=0: {(y == 0).sum()} ({(y == 0).sum() / len(y) * 100:.2f}%)")
 
-    # 划分训练集和测试集
+    # Split into training and test sets.
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, shuffle=False
     )
     X_train = precompute_features(X_train)
     X_train.attrs['data_id'] = 'train_sample_v1'
-    # === 新增：仅供 MCTS/AlphaPool 使用的去量纲版本 ===
+    # Added: use a dimensionless/preprocessed version only for MCTS/AlphaPool.
     X_train_mcts = _preprocess_for_mcts(X_train)
     X_test_mcts = _preprocess_for_mcts(X_test) if args.backtest else None
 
     logger.info(f"Train shape: {X_train.shape}, Test shape: {X_test.shape}")
 
-    # 第2-4部分：MCTS和Alpha池管理
+    # Parts 2-4: MCTS and alpha pool management.
     logger.info("=== Parts 2-4: MCTS & Alpha Pool Management ===")
 
     logger.info("Using Token system with Risk Seeking Policy Network")
@@ -214,13 +217,13 @@ def main(args):
 
     evaluate_formula = FormulaEvaluator()
 
-    # 初始化Alpha池
+    # Initialize alpha pool.
     alpha_pool = AlphaPool(
         pool_size=ALPHA_POOL_CONFIG['pool_size'],
         lambda_param=ALPHA_POOL_CONFIG['lambda_param']
     )
 
-    # 添加公式到池中
+    # Add formulas to the pool.
     if best_formulas_quantile:
         for formula, score in best_formulas_quantile:
             alpha_pool.add_to_pool({
@@ -229,10 +232,10 @@ def main(args):
                 'ic': score
             })
 
-        # 使用与训练相同的采样集更新池
+        # Update the pool using the same sampled data as training (if applicable).
         if args.use_risk_seeking and hasattr(trainer, 'X_train_sample'):
-            # 如果 MCTS 使用了采样，池更新也用完全相同的采样集与口径
-            # 注意：trainer.X_train_sample 已经是预处理后的版本，无需再次 preprocess
+            # If MCTS used sampling, pool updates must use the exact same sample and convention.
+            # Note: trainer.X_train_sample is already preprocessed; do not preprocess again.
             X_pool_update = trainer.X_train_sample
             y_pool_update = trainer.y_train_sample
 
@@ -256,7 +259,7 @@ def main(args):
     for i, formula in enumerate(top_formulas[:5], 1):
         logger.info(f"  {i}. {formula[:80]}...")
 
-    # 第5部分：应用公式转换数据集
+    # Part 5: apply formulas to transform the dataset.
     if args.transform_data:
         logger.info("=== Part 5: Apply Formulas to Transform Dataset ===")
         transformed_X = apply_alphas_and_return_transformed(X, top_formulas, evaluate_formula)
@@ -267,7 +270,7 @@ def main(args):
             logger.info(f"Saving transformed data to {output_path}")
             transformed_X.to_csv(output_path)
 
-    # 第6部分：交叉验证
+    # Part 6: cross-validation.
     if args.cross_validate:
         logger.info("=== Part 6: Cross-Validation ===")
         cv_results = cross_validate_formulas(
@@ -284,12 +287,12 @@ def main(args):
             logger.info(f"Mean IC: {results['Mean IC']:.4f}")
             logger.info(f"IC Std Dev: {results['IC Std Dev']:.4f}")
 
-    # 第7部分：回测
+    # Part 7: backtest.
     if args.backtest:
         logger.info("=== Part 7: Backtest ===")
         backtest_results = backtest_formulas(top_formulas, X_test, y_test)
 
-        # 按IC值排序结果
+        # Sort results by IC.
         sorted_results = sorted(backtest_results.items(), key=lambda x: x[1], reverse=True)
 
         logger.info("\nSorted backtest results (by IC):")
@@ -297,7 +300,7 @@ def main(args):
             logger.info(f"Formula: {formula}")
             logger.info(f"Information Coefficient (IC): {ic:.4f}\n")
 
-    # 保存结果
+    # Save results.
     if args.save_results:
         results_path = args.results_path or "alpha_results.txt"
         logger.info(f"Saving results to {results_path}")
@@ -367,7 +370,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--results_path",
         type=str,
-        default="alpha_results.txt",
+       default="alpha_results.txt",
         help="Path to save the alpha results"
     )
     parser.add_argument(
