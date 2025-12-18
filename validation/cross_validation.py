@@ -1,4 +1,4 @@
-"""交叉验证模块 validation/cross_validation.py"""
+"""Cross-validation module"""
 import numpy as np
 from sklearn.model_selection import TimeSeriesSplit
 from scipy.stats import spearmanr
@@ -10,17 +10,17 @@ logger = logging.getLogger(__name__)
 
 def evaluate_formula_cross_val(formula, X, y, n_splits, evaluate_formula_func=None):
     """
-    使用交叉验证评估公式
+    Evaluate a formula using cross-validation.
 
     Parameters:
-    - formula: 要评估的alpha公式
-    - X: 特征数据
-    - y: 目标数据
-    - n_splits: 交叉验证折数
-    - evaluate_formula_func: 评估公式的函数
+    - formula: Alpha formula to evaluate.
+    - X: Feature data.
+    - y: Target data.
+    - n_splits: Number of CV splits.
+    - evaluate_formula_func: Optional custom formula evaluation function.
 
     Returns:
-    - ic_scores: 每折的IC分数列表
+    - ic_scores: List of IC scores for each fold.
     """
     evaluator = FormulaEvaluator() if evaluate_formula_func is None else None
     eval_fn = evaluator.evaluate if evaluate_formula_func is None else evaluate_formula_func
@@ -34,17 +34,17 @@ def evaluate_formula_cross_val(formula, X, y, n_splits, evaluate_formula_func=No
         X_train_fold, X_test_fold = X.iloc[train_index], X.iloc[test_index]
         y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
 
-        # 评估测试折上的公式
+        # Evaluate the formula on the test fold.
         feature_test = eval_fn(formula, X_test_fold)
 
-        # 清理数据
+        # Clean and align data.
         valid_indices = ~(feature_test.isna() | y_test_fold.isna())
         feature_test_clean = feature_test[valid_indices]
         y_test_fold_clean = y_test_fold[valid_indices]
 
         logger.debug(f"Valid data points: {len(feature_test_clean)}")
 
-        # 计算IC
+        # Compute IC.
         if len(feature_test_clean) > 1:
             ic, _ = spearmanr(feature_test_clean, y_test_fold_clean)
             ic_scores.append(ic if not np.isnan(ic) else 0)
@@ -57,10 +57,10 @@ def evaluate_formula_cross_val(formula, X, y, n_splits, evaluate_formula_func=No
 
 def cross_validate_formulas(formulas, X, y, n_splits, evaluate_formula_func=None):
     """
-    对多个公式进行交叉验证
+    Cross-validate multiple formulas.
 
     Returns:
-    - cv_results: 包含每个公式CV结果的字典
+    - cv_results: Dict containing CV results for each formula.
     """
     if evaluate_formula_func is None:
         evaluator = FormulaEvaluator()
