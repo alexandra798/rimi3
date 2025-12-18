@@ -1,4 +1,4 @@
-"""Alpha模块 - 公式评估和池管理"""
+"""Alpha module - Handles formula evaluation and alpha pool management"""
 from .evaluator import FormulaEvaluator
 from .pool import AlphaPool
 
