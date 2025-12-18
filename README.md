@@ -56,17 +56,6 @@ Rimi3/
 
 ## 🚀 Quick Start
 
-### Requirements
-
-```bash
-Python >= 3.8
-PyTorch >= 1.9
-pandas >= 1.3.0
-numpy >= 1.21.0
-scikit-learn >= 0.24.0
-scipy >= 1.7.0
-```
-
 ### Installation
 
 ```bash
@@ -422,13 +411,6 @@ This project is inspired by the following papers:
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 📧 Contact
-
-- Project Link: [https://github.com/yourusername/Rimi3](https://github.com/yourusername/Rimi3)
-- Issue Tracker: [Issues](https://github.com/yourusername/Rimi3/issues)
 
 ---
 
