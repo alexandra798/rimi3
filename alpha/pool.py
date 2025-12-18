@@ -1,4 +1,5 @@
-# alpha/pool.py 完整修复版
+# alpha/pool.py
+
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
@@ -16,60 +17,61 @@ class AlphaPool:
         self.lambda_param = lambda_param
         self.learning_rate = learning_rate
 
-        # 新增：常数检测参数
-        self.min_std = min_std  # 最小标准差阈值
-        self.min_unique_ratio = min_unique_ratio  # 最小唯一值比例
+        # New: constant-value detection thresholds
+        self.min_std = min_std          # Minimum standard deviation to treat as non-constant
+        self.min_unique_ratio = min_unique_ratio  # Minimum ratio of unique values
 
         self.alphas = []
         self.model = None
 
-        # 新增：统计信息
+        # New: bookkeeping for diagnostics
         self.rejected_constant_count = 0
         self.rejected_low_ic_count = 0
 
     def is_valid_alpha(self, alpha_values):
         """
-        检查alpha是否有效（非常数）
+        Check whether an alpha series is valid (i.e., not constant/degenerate).
 
         Args:
-            alpha_values: alpha的值序列
+            alpha_values: Sequence/Series of alpha values.
 
         Returns:
-            bool: 是否为有效的非常数alpha
+            bool: True if the series is valid (non-constant), False otherwise.
         """
         if alpha_values is None:
             return False
 
-        # 转换为numpy数组
+        # Convert to numpy array when possible
         if hasattr(alpha_values, 'values'):
             values = alpha_values.values
         else:
             values = np.array(alpha_values)
 
-        # 检查是否为空
+        # Empty sequence check
         if len(values) == 0:
             return False
 
-        # 确保是数值类型
+        # Ensure numeric dtype
         try:
             values = np.array(values, dtype=np.float64)
         except (ValueError, TypeError):
             return False
 
-        # 移除NaN
+        # Drop NaNs
         valid_values = values[~np.isnan(values)]
 
-        if len(valid_values) < 10:  # 太少有效值
+        # Require a minimum number of valid observations
+        if len(valid_values) < 10:
             return False
 
-        # 检查1: 标准差
+        # Check 1: standard deviation
         std = np.std(valid_values)
         if std < self.min_std:
             logger.debug(f"Alpha rejected: nearly constant (std={std:.8f})")
             self.rejected_constant_count += 1
             return False
 
-        # 检查2: 唯一值比例
+        # Check 2: uniqueness ratio
         unique_count = len(np.unique(valid_values))
         unique_ratio = unique_count / len(valid_values)
         if unique_ratio < self.min_unique_ratio:
@@ -77,11 +79,11 @@ class AlphaPool:
             self.rejected_constant_count += 1
             return False
 
-        # 检查3: 变异系数（相对标准差）
+        # Check 3: coefficient of variation (relative variability)
         mean_val = np.mean(valid_values)
-        if abs(mean_val) > 1e-10:  # 避免除零
+        if abs(mean_val) > 1e-10:  # avoid division by zero
             cv = std / abs(mean_val)
-            if cv < 0.001:  # 变异系数太小
+            if cv < 0.001:
                 logger.debug(f"Alpha rejected: low coefficient of variation ({cv:.6f})")
                 self.rejected_constant_count += 1
                 return False
@@ -90,25 +92,28 @@ class AlphaPool:
 
     def add_to_pool(self, alpha_info):
         """
-        Args: alpha_info: 字典，包含 'formula', 'score', 可选 'values', 'ic'
+        Add an alpha record to the pool if it passes validity checks.
+
+        Args:
+            alpha_info: dict with required 'formula', 'score'; optional 'values', 'ic'
         """
-        # 首先检查是否已存在
+        # Skip duplicates by formula identity
         if any(a['formula'] == alpha_info['formula'] for a in self.alphas):
             return
 
-        # 新增：检查alpha有效性
+        # Validate alpha series if present
         if 'values' in alpha_info:
             if not self.is_valid_alpha(alpha_info['values']):
                 logger.info(f"Rejected constant alpha: {alpha_info['formula'][:50]}...")
                 return
 
-        # 新增：检查IC阈值
+        # Enforce minimal IC threshold if provided
         if 'ic' in alpha_info and abs(alpha_info.get('ic', 0)) < 0.01:
             logger.debug(f"Rejected low IC alpha: IC={alpha_info['ic']:.4f}")
             self.rejected_low_ic_count += 1
             return
 
-        # 确保有必要的字段
+        # Ensure required fields exist
         if 'weight' not in alpha_info:
             alpha_info['weight'] = 1.0 / max(len(self.alphas), 1)
         if 'ic' not in alpha_info and 'score' in alpha_info:
@@ -117,16 +122,24 @@ class AlphaPool:
         self.alphas.append(alpha_info)
         logger.info(f"Added valid alpha to pool: {alpha_info['formula'][:50]}... (IC={alpha_info.get('ic', 0):.4f})")
 
-        # 如果超过池大小，移除最差的
+        # If pool grows beyond capacity, remove the worst one
         if len(self.alphas) > self.pool_size:
             self._remove_worst_alpha()
 
     def update_pool(self, X_data, y_data, evaluate_formula):
         """
-        更新整个池：评估所有公式并优化权重
+        Re-evaluate all formulas in the pool and optimize weights.
+
+        This step:
+          1) Recomputes 'values' for each formula in the current data context.
+          2) Filters out invalid/degenerate alphas.
+          3) Recomputes IC for valid alphas.
+          4) Runs gradient descent to refresh weights.
+          5) Sorts and truncates the pool.
         """
         import hashlib
 
+        # Context identity (based on index) to avoid mixing cached values from different datasets
         if isinstance(X_data, pd.DataFrame):
             context_id = hashlib.md5(X_data.index.values.tobytes()).hexdigest()[:8]
         else:
@@ -137,7 +150,7 @@ class AlphaPool:
         alphas_to_remove = []
 
         for i, alpha in enumerate(self.alphas):
-            # 每次都重新计算，不依赖缓存的values
+            # Always recompute if context changed or missing
             if 'context_id' not in alpha or alpha['context_id'] != context_id:
                 try:
                     alpha['values'] = evaluate_formula.evaluate(
@@ -147,16 +160,16 @@ class AlphaPool:
                     )
                     alpha['context_id'] = context_id
 
-                    # 检查有效性
+                    # Validate the computed series
                     if not self.is_valid_alpha(alpha['values']):
                         alphas_to_remove.append(i)
                         continue
 
-                    # 计算IC
+                    # Compute IC against target
                     if alpha['values'] is not None and not alpha['values'].isna().all():
                         alpha['ic'] = self._calculate_ic(alpha['values'], y_data)
 
-                        # 检查IC阈值
+                        # Enforce minimal IC threshold
                         if abs(alpha['ic']) < 0.01:
                             alphas_to_remove.append(i)
                     else:
@@ -166,65 +179,62 @@ class AlphaPool:
                     logger.warning(f"Failed to evaluate formula: {alpha['formula'][:50]}...")
                     alphas_to_remove.append(i)
 
-        # 2. 移除无效的alpha（这个必须保留！）
+        # Remove invalid/low-quality alphas (order reversed for safe popping)
         for idx in reversed(alphas_to_remove):
             removed = self.alphas.pop(idx)
             logger.info(f"Removed invalid alpha: {removed['formula'][:50]}...")
 
-        # 3. 优化权重（这个必须保留！需要values）
+        # Optimize weights using gradient descent (requires 'values')
         if len(self.alphas) > 0:
             self._optimize_weights_gradient_descent(X_data, y_data)
 
-        # 优化完成后，可以选择性地清理values以节省内存
+        # Optional: free memory by dropping 'values' after optimization
         for alpha in self.alphas:
             if 'values' in alpha:
-                del alpha['values']  # 优化完成后删除values
+                del alpha['values']
 
-        # 4. 根据IC排序（保留）
-        self.alphas.sort(key=lambda x: abs(x.get('ic', 0)), reverse=True)
+        # Sort by |IC * weight| to rank importance
+        self.alphas.sort(key=lambda x: abs(x.get('ic', 0) * x.get('weight', 1)), reverse=True)
 
-        # 5. 保持池大小（保留）
+        # Keep pool within capacity
         if len(self.alphas) > self.pool_size:
             self.alphas = self.alphas[:self.pool_size]
 
     def maintain_pool(self, new_alpha, X_data, y_data):
         """
-        Algorithm 1: 维护alpha池（保留原有实现）
-        输入：当前alpha集合F，新alpha f_new，组合模型c(·|F,ω)
-        输出：最优alpha集合F*和权重ω*
+        Algorithm 1: Maintain the alpha pool (original implementation retained)
+        Input : current set F, new alpha f_new, composite model c(·|F, ω)
+        Output: optimal set F* and weights ω*
         """
         # Step 1: F ← F ∪ f_new
         self.alphas.append(new_alpha)
 
-        # Step 2-4: 梯度下降优化权重
+        # Step 2-4: optimize weights by gradient descent
         self._optimize_weights_gradient_descent(X_data, y_data)
 
-        # Step 5-6: 如果超过池大小，移除权重最小的alpha
+        # Step 5-6: if pool exceeds capacity, remove the smallest-weight alpha, then re-optimize
         if len(self.alphas) > self.pool_size:
             self._remove_worst_alpha()
-            # 重新优化权重
             self._optimize_weights_gradient_descent(X_data, y_data)
 
         return self.alphas
 
     def get_top_formulas(self, n=5):
         """
-        获取最佳的n个公式
+        Return the top-n formula strings by |IC * weight|.
 
         Args:
-            n: 返回的公式数量
+            n: number of formulas to return.
 
         Returns:
-            公式字符串列表
+            List[str]: top-n formula strings.
         """
-        # 根据IC或权重排序
         sorted_alphas = sorted(
             self.alphas,
             key=lambda x: abs(x.get('ic', 0) * x.get('weight', 1)),
             reverse=True
         )
 
-        # 返回前n个公式
         top_formulas = []
         for alpha in sorted_alphas[:n]:
             formula = alpha['formula']
@@ -236,11 +246,11 @@ class AlphaPool:
         return top_formulas
 
     def _optimize_weights_gradient_descent(self, X_data, y_data, max_iters=100):
-        """使用梯度下降优化权重（论文核心）"""
+        """Optimize weights via gradient descent (core of the referenced method)."""
         if len(self.alphas) == 0:
             return
 
-        # 构建特征矩阵
+        # Build feature matrix from current alpha values
         feature_matrix = []
         valid_indices = []
 
@@ -259,12 +269,12 @@ class AlphaPool:
         X = np.column_stack(feature_matrix)
         y = y_data.values if hasattr(y_data, 'values') else y_data
 
-        # 确保维度匹配
+        # Align lengths defensively
         min_len = min(len(X), len(y))
         X = X[:min_len]
         y = y[:min_len]
 
-        # 移除NaN
+        # Drop rows with any NaNs
         valid_mask = ~(np.any(np.isnan(X), axis=1) | np.isnan(y))
         if valid_mask.sum() < 10:
             logger.warning("Insufficient valid data for optimization")
@@ -273,8 +283,7 @@ class AlphaPool:
         X_clean = X[valid_mask]
         y_clean = y[valid_mask]
 
-        # === 新增：列标准化，防止数值爆炸 ===
-
+        # === New: per-column standardization to stabilize optimization ===
         with np.errstate(all='ignore'):
             col_mean = X_clean.mean(axis=0)
             col_std = X_clean.std(axis=0)
@@ -283,142 +292,23 @@ class AlphaPool:
             X_clean = (X_clean - col_mean) / col_std_safe
             X_clean = np.clip(X_clean, -10, 10)
 
-        # 初始化权重
+        # Initialize weights from existing entries (fallback to uniform)
         weights = np.array([self.alphas[i].get('weight', 1.0 / len(valid_indices))
                             for i in valid_indices])
 
-        # 梯度下降
+        # Gradient descent with L2 regularization
         best_loss = float('inf')
         best_weights = weights.copy()
 
         for iteration in range(max_iters):
-            # 前向传播：计算预测值
+            # Forward pass
             predictions = X_clean @ weights
 
-            # 计算MSE损失
+            # Mean Squared Error loss
             error = predictions - y_clean
             loss = np.mean(error ** 2)
 
-            # 保存最佳权重
+            # Track best weights seen so far
             if loss < best_loss:
                 best_loss = loss
                 best_weights = weights.copy()
-
-            # 反向传播：计算梯度
-            gradient = 2.0 * (X_clean.T @ error) / len(y_clean)
-
-            # L2正则化
-            gradient += self.lambda_param * weights
-
-            # 更新权重
-            weights -= self.learning_rate * gradient
-
-            # 早停条件
-            if np.linalg.norm(gradient) < 1e-6:
-                break
-
-        # 使用最佳权重更新alpha
-        for idx, i in enumerate(valid_indices):
-            self.alphas[i]['weight'] = best_weights[idx]
-
-        logger.debug(f"Optimized weights after {iteration + 1} iterations, loss={best_loss:.6f}")
-
-    def _remove_worst_alpha(self):
-        """移除权重最小的alpha"""
-        if len(self.alphas) > 0:
-            # 找到绝对权重最小的alpha
-            min_weight_idx = np.argmin([abs(a.get('weight', 0)) for a in self.alphas])
-            removed_alpha = self.alphas.pop(min_weight_idx)
-            logger.info(f"Removed alpha with min weight: {removed_alpha['formula'][:50]}...")
-
-    def _calculate_ic(self, predictions, targets):
-        """计算IC（Pearson相关系数）"""
-        try:
-            if hasattr(predictions, 'values'):
-                predictions = predictions.values
-            if hasattr(targets, 'values'):
-                targets = targets.values
-
-            predictions = np.array(predictions).flatten()
-            targets = np.array(targets).flatten()
-
-            # 对齐长度
-            min_len = min(len(predictions), len(targets))
-            predictions = predictions[:min_len]
-            targets = targets[:min_len]
-
-            # 移除NaN
-            valid_mask = ~(np.isnan(predictions) | np.isnan(targets))
-            if valid_mask.sum() < 2:
-                return 0.0
-
-            corr, _ = pearsonr(predictions[valid_mask], targets[valid_mask])
-            return corr if not np.isnan(corr) else 0.0
-
-        except Exception as e:
-            logger.error(f"Error calculating IC: {e}")
-            return 0.0
-
-    def get_composite_alpha_value(self, X_data):
-        """计算合成alpha值"""
-        if len(self.alphas) == 0:
-            return None
-
-        weighted_sum = None
-        total_weight = 0
-
-        for alpha in self.alphas:
-            if 'values' in alpha and 'weight' in alpha and alpha['values'] is not None:
-                values = alpha['values']
-                weight = alpha['weight']
-
-                if weighted_sum is None:
-                    weighted_sum = weight * values
-                else:
-                    weighted_sum += weight * values
-
-                total_weight += abs(weight)
-
-        # 归一化
-        if weighted_sum is not None and total_weight > 0:
-            return weighted_sum / total_weight
-
-        return weighted_sum
-
-    def get_pool_statistics(self):
-        """获取池的统计信息"""
-        if not self.alphas:
-            return {}
-
-        ics = [a.get('ic', 0) for a in self.alphas]
-        weights = [a.get('weight', 0) for a in self.alphas]
-
-        # 计算alpha多样性
-        if len(self.alphas) > 1:
-            correlations = []
-            for i in range(len(self.alphas) - 1):
-                for j in range(i + 1, len(self.alphas)):
-                    if 'values' in self.alphas[i] and 'values' in self.alphas[j]:
-                        corr = self._calculate_mutual_ic(
-                            self.alphas[i]['values'],
-                            self.alphas[j]['values']
-                        )
-                        if not np.isnan(corr):
-                            correlations.append(abs(corr))
-
-            avg_correlation = np.mean(correlations) if correlations else 0
-        else:
-            avg_correlation = 0
-
-        return {
-            'pool_size': len(self.alphas),
-            'avg_ic': np.mean(ics),
-            'max_ic': np.max(ics),
-            'min_ic': np.min(ics),
-            'avg_weight': np.mean(weights),
-            'max_weight': np.max(weights),
-            'min_weight': np.min(weights),
-            'avg_correlation': avg_correlation,  # 新增：平均相关性
-            'rejected_constants': self.rejected_constant_count,  # 新增：拒绝的常数
-            'rejected_low_ic': self.rejected_low_ic_count  # 新增：拒绝的低IC
-        }
