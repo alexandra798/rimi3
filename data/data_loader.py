@@ -1,4 +1,7 @@
-"""数据加载和预处理模块 - 改进版"""
+"""
+Data loading and preprocessing module
+"""
+
 import pandas as pd
 import numpy as np
 import logging
@@ -10,35 +13,37 @@ logger = logging.getLogger(__name__)
 
 def load_user_dataset(file_path='price_volume_target5d.csv', target_column='target'):
     """
-    加载用户数据集，设置目标列，并准备特征。
+    Load a user-provided dataset, set the target column, and prepare features.
 
     Parameters:
-    - file_path: 数据集文件路径 (CSV或.pt文件), 默认为 price_volume_target5d.csv
-    - target_column: 数据集中的目标列名称, 默认为 'target'
+    - file_path: Path to the dataset file (CSV or .pt). Default is 'price_volume_target5d.csv'.
+    - target_column: Name of the target column in the dataset. Default is 'target'.
 
     Returns:
-    - X (特征), y (目标), all_features (特征名称列表)
+    - X: Feature DataFrame
+    - y: Target Series
+    - all_features: List of feature column names
     """
     logger.info(f"Loading dataset from {file_path}")
 
-    # 判断文件类型
+    # Determine file type
     if file_path.endswith('.pt'):
-        # 加载PyTorch二进制文件
+        # Load PyTorch serialized file
         data_dict = torch.load(file_path, weights_only=False)
 
-        # 提取数据
+        # Extract tensors
         X_tensor = data_dict['X']
         y_tensor = data_dict['y']
         all_features = data_dict['feature_columns']
 
-        # 转换为pandas DataFrame以保持与原代码的兼容性
+        # Convert tensors to pandas structures for compatibility
         X = pd.DataFrame(X_tensor.numpy(), columns=all_features)
         y = pd.Series(y_tensor.numpy(), name=target_column)
 
-        # 如果有date和ticker信息，重建索引
+        # Rebuild MultiIndex if date and ticker information is available
         if data_dict.get('has_date') and data_dict.get('has_ticker'):
             if 'dates' in data_dict and 'tickers' in data_dict:
-                # 创建多级索引
+                # Create a MultiIndex: (ticker, date)
                 index = pd.MultiIndex.from_arrays(
                     [data_dict['tickers'], pd.to_datetime(data_dict['dates'])],
                     names=['ticker', 'date']
@@ -47,26 +52,27 @@ def load_user_dataset(file_path='price_volume_target5d.csv', target_column='targ
                 y.index = index
 
     else:
-        # 原始CSV加载逻辑
+        # Original CSV loading logic
         user_dataset = pd.read_csv(file_path)
 
-        # 转换日期列为datetime格式
+        # Convert date column to datetime format
         if 'date' in user_dataset.columns:
             user_dataset['date'] = pd.to_datetime(user_dataset['date'], errors='coerce')
             user_dataset.dropna(subset=['date'], inplace=True)
-            # 如果存在ticker和date，设置多级索引
+
+            # Set MultiIndex if both ticker and date exist
             if 'ticker' in user_dataset.columns:
                 user_dataset.set_index(['ticker', 'date'], inplace=True)
 
-        # 确保目标列存在
+        # Ensure the target column exists
         if target_column not in user_dataset.columns:
             raise ValueError(f"Target column '{target_column}' not found in dataset.")
 
-        # 分离特征和目标
+        # Separate features and target
         X = user_dataset.drop(columns=[target_column])
         y = user_dataset[target_column]
 
-        # 获取特征名称列表
+        # Collect feature names
         all_features = X.columns.tolist()
 
     logger.info(f"Features shape: {X.shape}, Target shape: {y.shape}")
@@ -75,22 +81,23 @@ def load_user_dataset(file_path='price_volume_target5d.csv', target_column='targ
 
 def detect_suspension_periods(df, price_columns=['close']):
     """
-    检测停牌期间（价格连续5天不变）
+    Detect suspension periods where prices remain unchanged for 5 consecutive days.
 
     Parameters:
-    - df: DataFrame，应该是单个ticker的数据
-    - price_columns: 用于检测停牌的价格列
+    - df: DataFrame containing data for a single ticker
+    - price_columns: Price columns used to detect suspension
 
     Returns:
-    - suspension_mask: bool Series，True表示停牌期
+    - suspension_mask: Boolean Series, True indicates suspension period
     """
     suspension_mask = pd.Series(False, index=df.index)
 
     for col in price_columns:
         if col in df.columns:
-            # 检测连续5天价格不变
+            # Compute rolling standard deviation over a 5-day window
             rolling_std = df[col].rolling(window=5, min_periods=5).std()
-            # 标准差为0或接近0表示价格无变化
+
+            # Near-zero standard deviation implies no price movement
             suspension_mask |= (rolling_std < 1e-10)
 
     return suspension_mask
@@ -98,27 +105,27 @@ def detect_suspension_periods(df, price_columns=['close']):
 
 def clean_target_zeros(X, y):
     """
-    清理target=0的数据，区分停牌和正常交易
+    Clean samples where target equals zero, distinguishing between suspension and normal trading.
 
     Parameters:
-    - X: 特征DataFrame
-    - y: 目标Series
+    - X: Feature DataFrame
+    - y: Target Series
 
     Returns:
-    - X_clean: 清理后的特征
-    - y_clean: 清理后的目标
+    - X_clean: Cleaned feature DataFrame
+    - y_clean: Cleaned target Series
     """
     logger.info(f"Cleaning target=0 samples. Initial shape: {len(y)}")
 
-    # 找出target=0的样本
+    # Identify samples with target equal to 0 or NaN
     zero_mask = (y == 0) | y.isna()
     logger.info(f"Found {zero_mask.sum()} samples with target=0 or NaN")
 
-    # 如果数据有多级索引（ticker, date）
+    # Case: MultiIndex (ticker, date)
     if isinstance(X.index, pd.MultiIndex):
         valid_mask = pd.Series(True, index=X.index)
 
-        # 按ticker分组处理
+        # Process each ticker independently
         for ticker in X.index.get_level_values(0).unique():
             ticker_mask = X.index.get_level_values(0) == ticker
             ticker_X = X[ticker_mask]
@@ -126,25 +133,24 @@ def clean_target_zeros(X, y):
             ticker_zero_mask = zero_mask[ticker_mask]
 
             if ticker_zero_mask.any():
-                # 检测停牌期
+                # Detect suspension periods for this ticker
                 suspension = detect_suspension_periods(ticker_X)
 
-                # target=0且处于停牌期的要删除
+                # Remove samples where target=0 during suspension
                 to_remove = ticker_zero_mask & suspension
                 valid_mask[ticker_mask] = ~to_remove
 
                 if to_remove.any():
                     logger.info(f"Ticker {ticker}: Removing {to_remove.sum()} suspended samples")
     else:
-        # 单ticker或无ticker索引的情况
+        # Case: single ticker or no ticker index
         suspension = detect_suspension_periods(X)
-        # 只删除target=0且停牌的样本
         to_remove = zero_mask & suspension
         valid_mask = ~to_remove
 
         logger.info(f"Removing {to_remove.sum()} suspended samples")
 
-    # 删除target缺失的行（无论是否停牌）
+    # Always remove samples with missing target values
     valid_mask = valid_mask & ~y.isna()
 
     X_clean = X[valid_mask]
@@ -158,47 +164,43 @@ def clean_target_zeros(X, y):
 
 def handle_missing_values(dataset, strategy='mixed'):
     """
-    处理数据集中的缺失值
+    Handle missing values in the dataset.
 
     Parameters:
-    - dataset: 要处理的DataFrame
-    - strategy: 处理策略
-      - 'mixed': 根据列类型采用不同策略（推荐）
-      - 'forward_fill': 前向填充
-      - 'backward_fill': 后向填充
-      - 其他原有策略
+    - dataset: Input DataFrame
+    - strategy: Missing value handling strategy
+        - 'mixed': Apply different strategies based on column type (recommended)
+        - 'forward_fill': Forward fill
+        - 'backward_fill': Backward fill
+        - Other legacy strategies
 
     Returns:
-    - dataset: 处理后的DataFrame
+    - dataset: Processed DataFrame
     """
     dataset = dataset.copy()
 
     if strategy == 'mixed':
-        # 价格类列：先后向填充，再前向填充
+        # Price-related columns: backward fill first, then forward fill
         price_cols = ['open', 'high', 'low', 'close', 'vwap']
         for col in price_cols:
             if col in dataset.columns:
-                # 先后向填充（处理开始时的缺失）
                 dataset[col] = dataset[col].bfill()
-                # 再前向填充（处理结尾的缺失）
                 dataset[col] = dataset[col].ffill()
 
-                # 检查是否还有缺失（整列都是NaN的情况）
+                # Handle columns still containing NaN (e.g., entirely missing)
                 if dataset[col].isna().any():
                     logger.warning(f"Column {col} still has {dataset[col].isna().sum()} NaN values after filling")
-                    # 用中位数填充剩余的NaN
                     median_val = dataset[col].median()
                     if pd.isna(median_val):
-                        # 如果中位数也是NaN，用0填充
                         dataset[col] = dataset[col].fillna(0)
                     else:
                         dataset[col] = dataset[col].fillna(median_val)
 
-        # 成交量：缺失填0
+        # Volume: fill missing values with 0
         if 'volume' in dataset.columns:
             dataset['volume'] = dataset['volume'].fillna(0)
 
-        # 其他列：前向填充后用0填充
+        # Other columns: forward fill, then fill remaining NaN with 0
         other_cols = [col for col in dataset.columns
                       if col not in price_cols + ['volume']]
         for col in other_cols:
@@ -220,14 +222,13 @@ def handle_missing_values(dataset, strategy='mixed'):
         logger.warning(f"Unknown strategy '{strategy}', using forward fill")
         dataset = dataset.ffill().fillna(0)
 
-    # 最终检查：确保没有NaN和inf
+    # Final safety check: ensure no NaN or infinite values remain
     if dataset.isna().any().any():
         nan_cols = dataset.columns[dataset.isna().any()].tolist()
         logger.error(f"Still have NaN values in columns: {nan_cols}")
-        # 强制填充为0
         dataset = dataset.fillna(0)
 
-    # 检查inf值
+    # Replace infinite values
     numeric_cols = dataset.select_dtypes(include=[np.number]).columns
     inf_mask = np.isinf(dataset[numeric_cols].values)
     if inf_mask.any():
@@ -239,19 +240,19 @@ def handle_missing_values(dataset, strategy='mixed'):
 
 def validate_data_quality(X, y):
     """
-    验证数据质量，确保MCTS可以正常运行
+    Validate data quality to ensure downstream algorithms (e.g., MCTS) can run safely.
 
     Parameters:
-    - X: 特征DataFrame
-    - y: 目标Series
+    - X: Feature DataFrame
+    - y: Target Series
 
     Returns:
-    - is_valid: bool，数据是否有效
-    - issues: list，发现的问题列表
+    - is_valid: Boolean indicating whether data quality is acceptable
+    - issues: List of detected issues
     """
     issues = []
 
-    # 检查NaN
+    # Check for NaN values
     if X.isna().any().any():
         nan_cols = X.columns[X.isna().any()].tolist()
         issues.append(f"NaN values found in features: {nan_cols}")
@@ -259,25 +260,21 @@ def validate_data_quality(X, y):
     if y.isna().any():
         issues.append(f"NaN values found in target: {y.isna().sum()} samples")
 
-    # 检查inf
+    # Check for infinite values
     numeric_cols = X.select_dtypes(include=[np.number]).columns
     if len(numeric_cols) > 0:
-        inf_mask = np.isinf(X[numeric_cols].values)
-        if inf_mask.any():
+        if np.isinf(X[numeric_cols].values).any():
             issues.append("Inf values found in features")
 
     if np.isinf(y.values).any():
         issues.append("Inf values found in target")
 
-    # 检查数据量
+    # Check sample size
     if len(X) < 100:
         issues.append(f"Too few samples: {len(X)}")
 
-    # 检查特征变化
-    constant_cols = []
-    for col in X.columns:
-        if X[col].nunique() == 1:
-            constant_cols.append(col)
+    # Check for constant (non-informative) features
+    constant_cols = [col for col in X.columns if X[col].nunique() == 1]
     if constant_cols:
         issues.append(f"Constant columns found: {constant_cols}")
 
@@ -295,11 +292,11 @@ def validate_data_quality(X, y):
 
 def check_missing_values(dataset, dataset_name):
     """
-    检查数据集中的缺失值（保持原有接口）
+    Check for missing values in a dataset (legacy interface preserved).
 
     Parameters:
-    - dataset: 要检查缺失值的DataFrame
-    - dataset_name: 数据集名称（用于打印）
+    - dataset: DataFrame to inspect
+    - dataset_name: Name of the dataset (used for logging)
     """
     missing_values = dataset.isnull().sum()
     missing_columns = missing_values[missing_values > 0]
@@ -313,24 +310,25 @@ def check_missing_values(dataset, dataset_name):
 
 def apply_alphas_and_return_transformed(X, alpha_formulas, evaluate_formula_func):
     """
-    应用顶级alpha公式到数据集，返回包含原始特征和新alpha特征的转换数据集
+    Apply alpha formulas to the dataset and return the transformed feature set.
 
     Parameters:
-    - X: 原始特征数据集
-    - alpha_formulas: 要应用的alpha公式列表
-    - evaluate_formula_func: 评估公式的函数
+    - X: Original feature DataFrame
+    - alpha_formulas: List of alpha formulas to apply
+    - evaluate_formula_func: Function used to evaluate each formula
 
     Returns:
-    - transformed_X: 包含原始特征和新alpha特征的数据集
+    - transformed_X: DataFrame containing original and alpha-generated features
     """
     transformed_X = X.copy()
 
     for formula in alpha_formulas:
         result = evaluate_formula_func(formula, X)
-        # 处理结果中的NaN值
+
+        # Replace invalid values
         result = result.fillna(0)
-        # 处理inf值
         result = result.replace([np.inf, -np.inf], 0)
+
         transformed_X[formula] = result
 
     return transformed_X
@@ -338,25 +336,25 @@ def apply_alphas_and_return_transformed(X, alpha_formulas, evaluate_formula_func
 
 def prepare_stock_features(raw_data):
     """
-    准备论文要求的6个特征
+    Prepare the six core features required by the paper.
     """
     features = pd.DataFrame()
 
-    # 基础价格特征
+    # Basic price features
     features['open'] = raw_data['open']
     features['high'] = raw_data['high']
     features['low'] = raw_data['low']
     features['close'] = raw_data['close']
     features['volume'] = raw_data['volume']
 
-    # 计算VWAP (Volume Weighted Average Price)
-    # VWAP = Σ(Price * Volume) / Σ(Volume)
+    # Compute VWAP (Volume Weighted Average Price)
+    # VWAP = sum(Price * Volume) / sum(Volume)
     typical_price = (raw_data['high'] + raw_data['low'] + raw_data['close']) / 3
     features['vwap'] = (typical_price * raw_data['volume']).rolling(window=1).sum() / \
                        raw_data['volume'].rolling(window=1).sum()
 
-    # 计算收益率目标
-    returns_5d = raw_data['close'].pct_change(5).shift(-5)  # 未来5天收益率
-    returns_10d = raw_data['close'].pct_change(10).shift(-10)  # 未来10天收益率
+    # Compute future return targets
+    returns_5d = raw_data['close'].pct_change(5).shift(-5)    # 5-day forward return
+    returns_10d = raw_data['close'].pct_change(10).shift(-10) # 10-day forward return
 
     return features, returns_5d, returns_10d
