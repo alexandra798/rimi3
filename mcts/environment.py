@@ -1,4 +1,4 @@
-"""MDP环境 - 移除重复代码"""
+"""MDP环境"""
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
