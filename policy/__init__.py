@@ -1,4 +1,5 @@
-"""Policy模块初始化文件"""
+"""Policy package initialization
+"""
 from .network import PolicyNetwork
 from .optimizer import RiskSeekingOptimizer
 
