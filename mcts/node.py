@@ -1,41 +1,61 @@
-"""MCTS节点类定义 - 支持状态而非公式字符串"""
+# mcts/node.py
+"""
+MCTS node definition
+
+This implementation stores an MDPState at each node, and tracks edge statistics
+(N, P, Q, R, W) typically used by PUCT-style selection.
+"""
+
 import numpy as np
 import math
 
 
 class MCTSNode:
-    """蒙特卡洛树搜索节点 - 基于状态的新版本"""
+    """
+    Monte Carlo Tree Search node (state-based).
+
+    Each node represents:
+    - a state (MDPState)
+    - the action taken from the parent to reach this node
+    - edge statistics used by PUCT for selection and backup
+    """
 
     def __init__(self, state=None, parent=None, action=None, prior_prob=1.0, c_puct=1.0):
         """
-        初始化MCTS节点
+        Initialize an MCTS node.
 
         Args:
-            state: MDPState对象，表示当前状态
-            parent: 母节点
-            action: 从母节点到达此节点的动作（Token名称）
-            prior_prob: 策略网络给出的先验概率
+            state: MDPState instance representing the current environment state.
+            parent: Parent node.
+            action: Action (token name) taken from the parent to reach this node.
+            prior_prob: Prior probability P(s,a) provided by a policy network (or heuristic).
+            c_puct: Exploration coefficient used in the PUCT formula.
         """
         self.state = state
         self.parent = parent
-        self.action = action  # 到达此节点的动作
+        self.action = action  # Action taken to reach this node from its parent
         self.c_puct = c_puct
 
-        # 边信息（论文要求）
-        self.N = 0  # N(s,a) - 访问次数
-        self.P = prior_prob  # P(s,a) - 先验概率
-        self.Q = 0.0  # Q(s,a) - 动作价值
-        self.R = 0.0  # R(s,a) - 中间奖励
-        self.W = 0.0  # 累积奖励（用于计算Q）
+        # Edge statistics (as commonly used in PUCT / AlphaZero-style MCTS)
+        self.N = 0          # N(s,a) - visit count
+        self.P = prior_prob # P(s,a) - prior probability
+        self.Q = 0.0        # Q(s,a) - mean action value
+        self.R = 0.0        # R(s,a) - intermediate reward (optional / domain-specific)
+        self.W = 0.0        # W(s,a) - cumulative value sum (used to compute Q)
 
-        self.children = {}  # {action: child_node}
+        # Child nodes keyed by action token name: {action: child_node}
+        self.children = {}
 
     def is_expanded(self):
-        """检查节点是否已展开"""
+        """Return True if this node has been expanded (i.e., has any children)."""
         return len(self.children) > 0
 
     def is_terminal(self):
-        """检查是否为终止节点"""
+        """
+        Return True if this node is terminal.
+
+        Here, a terminal node is defined as one whose state's last token is 'END'.
+        """
         if self.state is None:
             return False
         if len(self.state.token_sequence) > 0:
@@ -43,7 +63,11 @@ class MCTSNode:
         return False
 
     def is_fully_expanded(self):
-        """检查节点是否已完全展开"""
+        """
+        Return True if all syntactically valid actions have corresponding child nodes.
+
+        Valid actions are determined by the RPNValidator, based on the current token sequence.
+        """
         if self.state is None:
             return False
         from core import RPNValidator
@@ -51,7 +75,14 @@ class MCTSNode:
         return all(action in self.children for action in valid_actions)
 
     def add_child(self, action, child_state, prior_prob=1.0):
-        """添加子节点"""
+        """
+        Create and attach a child node for the given action.
+
+        Parameters:
+        - action: token name representing the chosen action
+        - child_state: resulting MDPState after applying the action
+        - prior_prob: prior probability for this edge
+        """
         child = MCTSNode(
             state=child_state,
             parent=self,
@@ -62,38 +93,49 @@ class MCTSNode:
         return child
 
     def update(self, value):
-        """更新节点的访问次数和Q值"""
-        # 更新访问次数
+        """
+        Update visit count and value estimates using a backed-up evaluation.
+
+        The backup rule used here:
+        - N += 1
+        - W += value
+        - Q = W / N
+        """
+        # Increment visit count
         self.N += 1
 
-        # 更新累积奖励
+        # Accumulate total value
         self.W += value
 
-        # Q(s,a) = W(s,a) / N(s,a)
+        # Mean value estimate
         self.Q = self.W / self.N
 
     def update_intermediate_reward(self, reward):
-        """更新中间奖励R(s,a)"""
+        """
+        Store intermediate reward R(s,a) for analysis or auxiliary training signals.
+        """
         self.R = reward
 
-    # 重要
+    # Important
     def get_best_child(self, c_puct=None, diversity_penalty_func=None):
         """
-        使用论文中的PUCT公式选择最佳子节点，可选加入多样性惩罚
+        Select the best child node using the PUCT formula, optionally applying a diversity penalty.
 
         Args:
-            c_puct: 探索系数
-            diversity_penalty_func: 多样性惩罚函数，接受 child 节点返回惩罚值
+            c_puct: Optional override for the exploration coefficient.
+            diversity_penalty_func: Optional function mapping a child node -> penalty value
+                                   (subtracted from the exploration term).
         """
         if not self.children:
             return None
 
         c = c_puct if c_puct is not None else self.c_puct
 
-        # 计算母节点总访问次数
+        # Total visits across children; used for exploration scaling
         total_visits = sum(child.N for child in self.children.values())
 
-        # 首次访问，优先选择 P 有效且最大的；否则随机一个
+        # If no child has been visited, prefer the one with the highest valid prior.
+        # If priors are unusable, fall back to random choice.
         if total_visits == 0:
             valid_children = [ch for ch in self.children.values()
                               if np.isfinite(ch.P) and ch.P > 0.0]
@@ -107,24 +149,24 @@ class MCTSNode:
         best_child = None
 
         for child in self.children.values():
-            # Q 容错
+            # Q robustness: treat non-finite Q as 0
             q_value = child.Q
             if not np.isfinite(q_value):
                 q_value = 0.0
 
-            # P 容错
+            # P robustness: if prior is invalid, use a uniform fallback
             p_value = child.P
             if not (np.isfinite(p_value) and p_value > 0.0):
                 p_value = 1.0 / len(self.children)
 
-            # 计算 U 值
+            # Exploration term U: proportional to prior and total visits, inversely to child visits
             u_value = c * p_value * sqrt_total / (1.0 + child.N)
 
-            # 应用多样性惩罚（如果提供）
+            # Optional diversity penalty (reduces exploration bonus for less diverse children)
             if diversity_penalty_func:
                 u_value -= diversity_penalty_func(child)
 
-            # PUCT 值
+            # PUCT score
             puct_value = q_value + u_value
 
             if puct_value > best_value:
@@ -133,15 +175,21 @@ class MCTSNode:
 
         return best_child
 
-
     def get_visit_distribution(self):
-        """获取子节点的访问次数分布（用于最终动作选择）"""
+        """
+        Return (actions, visits) for child nodes.
+
+        This is typically used to form a policy target (e.g., proportional to visit counts)
+        when choosing the final action at the root.
+        """
         actions = list(self.children.keys())
         visits = [self.children[a].N for a in actions]
         return actions, visits
 
     def get_edge_info(self):
-        """获取边信息（用于调试）"""
+        """
+        Return edge statistics for debugging/inspection.
+        """
         return {
             'N(s,a)': self.N,
             'P(s,a)': self.P,
@@ -150,7 +198,11 @@ class MCTSNode:
         }
 
     def __repr__(self):
-        """节点的字符串表示"""
+        """
+        Human-readable representation of the node.
+
+        If a state exists, this prints a formula-like token string (excluding the initial BEG).
+        """
         if self.state:
             formula = ' '.join([t.name for t in self.state.token_sequence[1:]])
             return f"MCTSNode(formula='{formula}', N={self.N}, Q={self.Q:.4f}, R={self.R:.4f})"
