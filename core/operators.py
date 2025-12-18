@@ -1,4 +1,14 @@
-"""core/operators.py"""
+"""core/operators.py
+
+Collection of primitive operators used by the RPN evaluator.
+
+Notes
+-----
+- All operators are implemented as `@staticmethod`s on the `Operators` class.
+- Most operators accept pandas Series or NumPy arrays and try to preserve index/shape.
+- Time-series operators follow the naming convention `ts_*` and accept a data input plus a window size.
+- Numerical stability is prioritized: clipping, epsilon guards, and NaN/inf handling are used throughout.
+"""
 import numpy as np
 import pandas as pd
 import logging
@@ -8,51 +18,60 @@ from scipy import stats
 
 def _get_cache(series):
     """
-    获取/初始化 Series 级别的滚动结果缓存字典。
-    对于 pandas 的派生 Series，attrs 可能不会自动继承，这里只用于“原始列反复滚动”的高频场景。
+    Get or initialize a per-Series rolling-result cache dictionary.
+
+    In high-frequency scenarios where the same *raw* Series is repeatedly rolled over
+    with the same window (e.g., ts_mean/ts_std), we store computed results in
+    `series.attrs['_op_cache']`. Some pandas objects or versions may not support
+    `attrs` reliably; in those cases we silently disable caching by returning None.
     """
     try:
         return series.attrs.setdefault('_op_cache', {})
     except Exception:
-        # 某些 pandas 版本或对象不支持 attrs；则直接禁用缓存
+        # Some pandas versions or objects do not support attrs; disable cache gracefully.
         return None
 
-MAX_VALUE = 1e8  # 数值上限
-MIN_VALUE = -1e8  # 数值下限
-EPSILON = 1e-10  # 防止除零的最小值
+MAX_VALUE = 1e8   # Upper numeric bound for clipping
+MIN_VALUE = -1e8  # Lower numeric bound for clipping
+EPSILON = 1e-10   # Small epsilon to avoid division by zero
 
 logger = logging.getLogger(__name__)
 
 
 class Operators:
-    """所有操作符的静态方法集合"""
-
-
+    """Static operator collection used by the evaluator."""
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
 
     @staticmethod
     def ensure_series_or_array(operand, data_length=None, data_index=None):
-        """确保操作数是Series或Array"""
+        """Ensure operand is a Series/array; broadcast scalars when length/index are provided."""
         if isinstance(operand, (int, float)) and data_length:
             if data_index is not None:
                 return pd.Series(operand, index=data_index)
             else:
                 return pd.Series([operand] * data_length)
         return operand
-    # =================================
+
+    # -------------------------------------------------------------------------
+    # Safe arithmetic helpers
+    # -------------------------------------------------------------------------
     @staticmethod
     def safe_divide(x, y, default_value=0):
-        """安全除法函数，避免除零错误"""
+        """Division with guards against division-by-zero and infinities."""
         if isinstance(x, pd.Series):
-            # 修复：将无穷大也替换为 default_value
+            # Replace +/-inf and NaN with default_value
             return x.div(y).replace([np.inf, -np.inf], default_value).fillna(default_value)
         else:
             return np.divide(x, y, out=np.full_like(x, default_value, dtype=float), where=y != 0)
 
-    # 一元操作符====================
-
+    # -------------------------------------------------------------------------
+    # Unary operators
+    # -------------------------------------------------------------------------
     @staticmethod
     def csrank(operand, data_length=None, data_index=None):
-        """横截面排名"""
+        """Cross-sectional percentile rank (Series: by index or MultiIndex level=1)."""
         operand = Operators.ensure_series_or_array(operand, data_length, data_index)
         if isinstance(operand, pd.Series):
             if isinstance(operand.index, pd.MultiIndex):
@@ -60,12 +79,12 @@ class Operators:
             else:
                 return operand.rank(pct=True)
         else:
-            # NumPy数组
+            # NumPy array path
             return stats.rankdata(operand, method='average') / len(operand)
 
     @staticmethod
     def sign(operand, data_length=None, data_index=None):
-        """符号函数：正数返回1，非正返回0"""
+        """Sign-like indicator: return 1 for positive values, else 0."""
         operand = Operators.ensure_series_or_array(operand, data_length, data_index)
         if isinstance(operand, pd.Series):
             return (operand > 0).astype(float)
@@ -74,24 +93,25 @@ class Operators:
 
     @staticmethod
     def abs(operand, data_length=None, data_index=None):
-        """绝对值操作符"""
+        """Absolute value."""
         operand = Operators.ensure_series_or_array(operand, data_length, data_index)
         return np.abs(operand)
 
     @staticmethod
     def log(operand, data_length=None, data_index=None):
-        """安全的log操作: log(max(|x|+1e-10, 1e-10))"""
+        """Numerically safe log: log(max(|x|+1e-10, 1e-10))."""
         operand = Operators.ensure_series_or_array(operand, data_length, data_index)
         if isinstance(operand, pd.Series):
             return np.log(np.maximum(operand.abs() + 1e-10, 1e-10))
         else:
             return np.log(np.maximum(np.abs(operand) + 1e-10, 1e-10))
 
-
-    # 二元操作符========================================
+    # -------------------------------------------------------------------------
+    # Binary operators
+    # -------------------------------------------------------------------------
     @staticmethod
     def _align_operands(operand1, operand2):
-        """对齐两个操作数的形状"""
+        """Align scalar-vs-array/Series shapes by broadcasting scalars."""
         if isinstance(operand1, (int, float)) and isinstance(operand2, (pd.Series, np.ndarray)):
             if isinstance(operand2, pd.Series):
                 operand1 = pd.Series(operand1, index=operand2.index)
@@ -106,23 +126,23 @@ class Operators:
 
     @staticmethod
     def add(operand1, operand2, data_length=None, data_index=None):
-        """加法操作符"""
+        """Addition."""
         operand1, operand2 = Operators._align_operands(operand1, operand2)
         return operand1 + operand2
 
     @staticmethod
     def sub(operand1, operand2, data_length=None, data_index=None):
-        """减法操作符"""
+        """Subtraction."""
         operand1, operand2 = Operators._align_operands(operand1, operand2)
         return operand1 - operand2
 
     @staticmethod
     def mul(operand1, operand2, data_length=None, data_index=None):
-        """乘法操作符（添加数值裁剪）"""
+        """Multiplication with result clipping to a safe numeric range."""
         operand1, operand2 = Operators._align_operands(operand1, operand2)
         with np.errstate(over='ignore', invalid='ignore'):
             result = operand1 * operand2
-            # 裁剪到合理范围
+            # Clip to a reasonable numeric range to avoid blow-ups
             if isinstance(result, pd.Series):
                 result = result.clip(lower=MIN_VALUE, upper=MAX_VALUE)
             else:
@@ -131,10 +151,10 @@ class Operators:
 
     @staticmethod
     def div(operand1, operand2, data_length=None, data_index=None):
-        """安全除法操作符（改进版）"""
+        """Division with epsilon guards and result clipping."""
         operand1, operand2 = Operators._align_operands(operand1, operand2)
 
-        # 防止极小除数
+        # Guard tiny denominators
         if isinstance(operand2, pd.Series):
             operand2 = operand2.where(operand2.abs() > EPSILON, EPSILON)
         else:
@@ -142,7 +162,7 @@ class Operators:
 
         with np.errstate(over='ignore', divide='ignore', invalid='ignore'):
             result = Operators.safe_divide(operand1, operand2)
-            # 裁剪结果
+            # Clip result to avoid extreme values
             if isinstance(result, pd.Series):
                 result = result.clip(lower=MIN_VALUE, upper=MAX_VALUE)
             else:
@@ -151,36 +171,37 @@ class Operators:
 
     @staticmethod
     def greater(operand1, operand2, data_length=None, data_index=None):
-        """大于比较：x > y 返回1，否则0"""
+        """Comparison: 1.0 if x > y else 0.0."""
         operand1, operand2 = Operators._align_operands(operand1, operand2)
         return (operand1 > operand2).astype(float)
 
     @staticmethod
     def less(operand1, operand2, data_length=None, data_index=None):
-        """小于比较：x < y 返回1，否则0"""
+        """Comparison: 1.0 if x < y else 0.0."""
         operand1, operand2 = Operators._align_operands(operand1, operand2)
         return (operand1 < operand2).astype(float)
 
-    # 时序操作符=====================================
-
+    # -------------------------------------------------------------------------
+    # Time-series operators
+    # -------------------------------------------------------------------------
     @staticmethod
     def _ensure_window_int(window):
-        """确保window是整数"""
+        """Normalize and clamp `window` to an integer in [1, 100]."""
         if isinstance(window, (pd.Series, np.ndarray)):
             window = int(window[0]) if len(window) > 0 else 5
         else:
             window = int(window)
-        return max(1, min(window, 100))  # 限制窗口大小
+        return max(1, min(window, 100))  # Prevent pathological windows
 
     @staticmethod
     def ts_ref(data, window):
-        """引用t天前的值"""
+        """Shift by `window` steps (value from t-window)."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
             return data.shift(window)
         else:
-            # NumPy实现
+            # NumPy implementation
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
             result[:window] = np.nan
@@ -190,7 +211,7 @@ class Operators:
 
     @staticmethod
     def ts_rank(data, window):
-        """窗口内排名百分位"""
+        """Percentile rank of the current value within the rolling window."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
@@ -202,7 +223,7 @@ class Operators:
             result = data.rolling(window=window, min_periods=1).apply(rank_in_window, raw=False)
             return result.fillna(0.5)
         else:
-            # NumPy实现
+            # NumPy implementation
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
 
@@ -220,7 +241,7 @@ class Operators:
 
     @staticmethod
     def ts_mean(data, window):
-        """移动平均"""
+        """Rolling mean (with per-Series cache to speed up repeated calls)."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
@@ -235,7 +256,7 @@ class Operators:
                 cache[key] = result
             return result
         else:
-            # 原 Numpy 实现保持不变
+            # NumPy implementation (kept intentionally simple and explicit)
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
             for i in range(len(data)):
@@ -246,14 +267,14 @@ class Operators:
 
     @staticmethod
     def ts_med(data, window):
-        """移动中位数"""
+        """Rolling median."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
             result = data.rolling(window=window, min_periods=1).median()
             return result.bfill().fillna(0)
         else:
-            # NumPy实现
+            # NumPy implementation
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
 
@@ -265,7 +286,7 @@ class Operators:
 
     @staticmethod
     def ts_sum(data, window):
-        """移动求和"""
+        """Rolling sum with clipping to avoid extreme magnitudes."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
@@ -284,7 +305,7 @@ class Operators:
 
     @staticmethod
     def ts_std(data, window):
-        """标准差（防溢出 + 窗口缓存）"""
+        """Rolling standard deviation (with clipping and per-Series cache)."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
@@ -293,7 +314,7 @@ class Operators:
             if cache is not None and key in cache:
                 return cache[key]
 
-            # 先裁剪，保持你原来的稳健做法
+            # Clip first to ensure robustness
             data_clipped = data.clip(lower=MIN_VALUE, upper=MAX_VALUE)
             with np.errstate(all='ignore'):
                 result = data_clipped.rolling(window=window, min_periods=min(3, window)).std()
@@ -303,7 +324,7 @@ class Operators:
                 cache[key] = result
             return result
         else:
-            # 原 Numpy 分支保持不变
+            # NumPy branch
             data = np.clip(np.asarray(data), MIN_VALUE, MAX_VALUE)
             result = np.zeros_like(data, dtype=np.float64)
             for i in range(len(data)):
@@ -319,7 +340,7 @@ class Operators:
 
     @staticmethod
     def ts_var(data, window):
-        """方差（智能处理小窗口）"""
+        """Rolling variance with special handling for small windows."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
@@ -327,12 +348,12 @@ class Operators:
                 result = data.rolling(window=window, min_periods=min(3, window)).var()
             return result.replace([np.inf, -np.inf], 0).bfill().fillna(0)
         else:
-            # NumPy实现
+            # NumPy implementation with small-window fallback
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
 
             if window < 3:
-                # 小窗口：使用差分方差
+                # For tiny windows, approximate using first-difference variance
                 diff = np.diff(data, prepend=data[0])
 
                 for i in range(len(data)):
@@ -343,7 +364,7 @@ class Operators:
                     else:
                         result[i] = 0
             else:
-                # 正常窗口
+                # Standard variance on the window
                 for i in range(len(data)):
                     start_idx = max(0, i - window + 1)
                     window_data = data[start_idx:i + 1]
@@ -359,14 +380,14 @@ class Operators:
 
     @staticmethod
     def ts_max(data, window):
-        """移动最大值"""
+        """Rolling maximum."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
             result = data.rolling(window=window, min_periods=1).max()
             return result.bfill().fillna(data.fillna(0))
         else:
-            # NumPy实现
+            # NumPy implementation
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
 
@@ -378,14 +399,14 @@ class Operators:
 
     @staticmethod
     def ts_min(data, window):
-        """移动最小值"""
+        """Rolling minimum."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
             result = data.rolling(window=window, min_periods=1).min()
             return result.bfill().fillna(data.fillna(0))
         else:
-            # NumPy实现
+            # NumPy implementation
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
 
@@ -397,7 +418,7 @@ class Operators:
 
     @staticmethod
     def ts_skew(data, window):
-        """偏度（智能处理小窗口）"""
+        """Rolling skewness with a simplified proxy for very small windows."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
@@ -408,13 +429,13 @@ class Operators:
                 result = data.rolling(window=window, min_periods=min_periods).skew()
                 return result.fillna(0)
         else:
-            # NumPy实现
+            # NumPy implementation
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
 
             for i in range(len(data)):
                 if window < 5:
-                    # 小窗口：简化偏度估计
+                    # Small-window approximation for skewness
                     start_idx = max(0, i - max(window, 3) + 1)
                     window_data = data[start_idx:i + 1]
 
@@ -437,7 +458,7 @@ class Operators:
                     else:
                         result[i] = 0
                 else:
-                    # 正常窗口
+                    # Standard window case
                     start_idx = max(0, i - window + 1)
                     window_data = data[start_idx:i + 1]
 
@@ -457,7 +478,7 @@ class Operators:
 
     @staticmethod
     def ts_kurt(data, window):
-        """峰度（智能处理小窗口）"""
+        """Rolling kurtosis with a simplified proxy for very small windows."""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
@@ -468,13 +489,13 @@ class Operators:
                 result = data.rolling(window=window, min_periods=min_periods).kurt()
                 return result.fillna(0)
         else:
-            # NumPy实现
+            # NumPy implementation
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
 
             for i in range(len(data)):
                 if window < 5:
-                    # 小窗口：简化峰度估计
+                    # Small-window approximation for kurtosis
                     start_idx = max(0, i - max(window, 3) + 1)
                     window_data = data[start_idx:i + 1]
 
@@ -491,160 +512,10 @@ class Operators:
                     else:
                         result[i] = 0
                 else:
-                    # 正常窗口
+                    # Standard window case
                     start_idx = max(0, i - window + 1)
                     window_data = data[start_idx:i + 1]
 
                     if len(window_data) >= 4:
                         try:
-                            if np.std(window_data) < 1e-10:
-                                result[i] = 0
-                            else:
-                                val = stats.kurtosis(window_data, fisher=True)
-                                result[i] = 0 if not np.isfinite(val) else val
-                        except Exception:
-                            result[i] = 0
-                    else:
-                        result[i] = 0
-
-            return result
-
-    @staticmethod
-    def ts_wma(data, window):
-        """加权移动平均（Series 级窗口缓存）"""
-        window = Operators._ensure_window_int(window)
-
-        if isinstance(data, pd.Series):
-            cache = _get_cache(data)
-            key = ('ts_wma', int(window))
-            if cache is not None and key in cache:
-                return cache[key]
-
-            weights = np.arange(1, window + 1, dtype=np.float64)
-
-            def weighted_mean(x):
-                x = np.asarray(x, dtype=float)
-                m = ~np.isnan(x)
-                if not m.any():
-                    return 0.0
-                x = x[m]
-                w = weights[:len(x)]
-                w = w / w.sum()
-                return float(np.dot(x, w))
-
-            result = data.rolling(window=window, min_periods=1).apply(weighted_mean, raw=True)
-            # 这里保留原本的返回（原实现已足够稳健）；如需 bfill/fillna 可按你现状追加
-
-            if cache is not None:
-                cache[key] = result
-            return result
-        else:
-            # 原 Numpy 分支保持不变
-            data = np.asarray(data)
-            result = np.zeros_like(data, dtype=np.float64)
-            full_weights = np.arange(1, window + 1, dtype=np.float64)
-            for i in range(len(data)):
-                start_idx = max(0, i - window + 1)
-                window_data = data[start_idx:i + 1]
-                if window_data.size == 0:
-                    result[i] = 0.0
-                    continue
-                m = ~np.isnan(window_data)
-                if not m.any():
-                    result[i] = result[i - 1] if i > 0 and np.isfinite(result[i - 1]) else 0.0
-                    continue
-                valid = window_data[m]
-                w = np.arange(1, len(valid) + 1, dtype=np.float64)
-                w = w / w.sum()
-                result[i] = float(np.dot(valid, w))
-            return result
-
-    @staticmethod
-    def ts_ema(data, window):
-        """指数移动平均（Series 级窗口缓存）"""
-        window = Operators._ensure_window_int(window)
-
-        if isinstance(data, pd.Series):
-            cache = _get_cache(data)
-            key = ('ts_ema', int(window))
-            if cache is not None and key in cache:
-                return cache[key]
-
-            result = data.ewm(span=window, adjust=False, min_periods=1).mean()
-
-            if cache is not None:
-                cache[key] = result
-            return result
-        else:
-            # 原 Numpy 分支保持不变
-            data = np.asarray(data)
-            result = np.zeros_like(data, dtype=np.float64)
-            alpha = 2.0 / (window + 1)
-            result[0] = data[0]
-            for i in range(1, len(data)):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i - 1]
-            return result
-
-    # ================== 三元操作符（两个数据操作数 + 窗口）===========
-    @staticmethod
-    def corr(operand1, operand2, window):
-        """相关系数"""
-        window = Operators._ensure_window_int(window)
-
-        if isinstance(operand1, pd.Series) and isinstance(operand2, pd.Series):
-            result = operand1.rolling(window=window, min_periods=2).corr(operand2)
-            return result.fillna(0)
-        else:
-            # NumPy实现
-            operand1 = np.asarray(operand1)
-            operand2 = np.asarray(operand2)
-            result = np.zeros(len(operand1))
-
-            for i in range(len(operand1)):
-                start_idx = max(0, i - window + 1)
-                if i - start_idx >= 1:  # 至少需要2个点
-                    corr = np.corrcoef(operand1[start_idx:i + 1],
-                                       operand2[start_idx:i + 1])[0, 1]
-                    result[i] = corr if not np.isnan(corr) else 0
-
-            return result
-
-    @staticmethod
-    def cov(operand1, operand2, window):
-        """协方差"""
-        window = Operators._ensure_window_int(window)
-
-        if isinstance(operand1, pd.Series) and isinstance(operand2, pd.Series):
-            result = operand1.rolling(window=window, min_periods=2).cov(operand2)
-            return result.fillna(0)
-        else:
-            # NumPy实现
-            operand1 = np.asarray(operand1)
-            operand2 = np.asarray(operand2)
-            result = np.zeros(len(operand1))
-
-            for i in range(len(operand1)):
-                start_idx = max(0, i - window + 1)
-                if i - start_idx >= 1:  # 至少需要2个点
-                    cov = np.cov(operand1[start_idx:i + 1],
-                                 operand2[start_idx:i + 1])[0, 1]
-                    result[i] = cov if not np.isnan(cov) else 0
-
-            return result
-
-
-
-    @staticmethod
-    def decay_linear(x, t):
-        """Decay_linear operator: 线性衰减加权移动平均"""
-        if isinstance(x, pd.Series):
-            weights = np.arange(1, t + 1)
-            weights = weights / weights.sum()
-            result = x.rolling(window=t, min_periods=1).apply(
-                lambda w: np.dot(w[~np.isnan(w)], weights[:len(w[~np.isnan(w)])])
-                if len(w[~np.isnan(w)]) > 0 else 0
-            )
-            result = result.replace([np.inf, -np.inf], np.nan)
-            return result.fillna(0)
-        else:
-            raise TypeError("decay_linear operator requires pandas Series")
+                            if np.std(window_data) < 1e-_
