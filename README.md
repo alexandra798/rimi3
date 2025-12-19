@@ -70,8 +70,9 @@ $$\text{IC}_t = \text{Spearman}\big(\text{Factor}_t, \text{Return}_{t+1:t+k}\big
 
 ### Comprehensive Analysis Dashboard
 
+
 <p align="center">
-  <img src="docs/images/8_rimi3_dashboard.png" alt="Rimi3 Dashboard" width="95%"/>
+  <img width="5341" height="4931" alt="8_rimi3_dashboard" src="https://github.com/user-attachments/assets/5e64d7e0-e237-47ef-b04e-373c932ca1d6" />
 </p>
 
 *Dashboard includes: (A) Cumulative IC trajectory, (B) Factor correlation matrix, (C) IC decay analysis, (D) ICIR comparison, (E) Hit rate analysis, (F) Quintile return spreads.*
@@ -80,8 +81,9 @@ $$\text{IC}_t = \text{Spearman}\big(\text{Factor}_t, \text{Return}_{t+1:t+k}\big
 
 The following visualization shows the out-of-sample Information Coefficient for each discovered factor over the 2023-2025 period. All factors maintain stable positive IC with **ICIR > 1.0**.
 
+
 <p align="center">
-  <img src="docs/images/1_ic_time_series.png" alt="IC Time Series" width="90%"/>
+  <img width="4164" height="4605" alt="1_ic_time_series" src="https://github.com/user-attachments/assets/09eba5da-dabc-4d2c-b028-26ac389d4ac5" />
 </p>
 
 **Key Observations:**
@@ -91,21 +93,14 @@ The following visualization shows the out-of-sample Information Coefficient for 
 
 ### Factor Orthogonality
 
+
 <p align="center">
-  <img src="docs/images/2_factor_correlation.png" alt="Factor Correlation" width="70%"/>
+  <img width="2633" height="2378" alt="2_factor_correlation" src="https://github.com/user-attachments/assets/51dc6245-67f6-45a3-89b4-39fdc54f36c8" />
 </p>
 
 Factor correlation analysis demonstrates **low inter-factor correlation** (average |ρ| = 0.125), ensuring the ensemble provides incremental alpha rather than redundant signals.
 
-### IC Decay Analysis
 
-<p align="center">
-  <img src="docs/images/3_ic_decay.png" alt="IC Decay" width="85%"/>
-</p>
-
-IC decay patterns reveal factor characteristics:
-- **Volume-Adjusted Momentum**: Slow decay → suitable for weekly rebalancing
-- **Volume Breakout**: Fast decay → better for daily strategies
 
 ---
 
@@ -127,13 +122,10 @@ Rimi3/
 │   ├── network.py             # 4-layer GRU with attention
 │   └── optimizer.py           # Risk-seeking quantile optimizer
 │
-├── alpha/                     # Alpha Management
-│   ├── evaluator.py           # LRU-cached formula evaluation
-│   └── pool.py                # Lasso-weighted ensemble
-│
-└── analysis/                  # Factor Analysis
-    ├── ic_analysis.py         # IC/ICIR computation
-    └── visualization.py       # Professional plotting
+└── alpha/                     # Alpha Management
+    ├── evaluator.py           # LRU-cached formula evaluation
+    └── pool.py                # Lasso-weighted ensemble
+
 ```
 
 ---
@@ -230,33 +222,7 @@ def clip_extreme(x, n_sigma=3):
 | Precomputed Rolling | 3× | Cache `ts_mean`, `ts_std` for common windows |
 | **Total** | **50×** | 15s → 0.3s per factor evaluation |
 
----
 
-## 📝 Sample Alpha Formulas
-
-Discovered factors with interpretable financial logic:
-
-```python
-# Factor 1: Volume-Adjusted Momentum
-# Hypothesis: Price momentum is more reliable when accompanied by low volume volatility
-Rank(Div(Close, Delay(Close, 5))) × Neg(Ts_Std(Volume, 20))
-
-# Factor 2: Mean Reversion Signal
-# Hypothesis: Stocks far from their 10-day mean tend to revert
-Neg(Ts_Rank(Div(Close, Ts_Mean(Close, 10)), 5))
-
-# Factor 3: Intraday Intensity
-# Hypothesis: Consistent close near high indicates buying pressure
-Ts_Mean(Div(Sub(Close, Open), Sub(High, Low)), 10)
-
-# Factor 4: Volume Breakout
-# Hypothesis: Volume spikes in the direction of price movement signal continuation
-Div(Volume, Ts_Mean(Volume, 20)) × Sign(Sub(Close, Delay(Close, 1)))
-
-# Factor 5: Volatility-Adjusted Returns
-# Hypothesis: Risk-adjusted short-term returns predict forward performance
-Div(Ts_Mean(Returns, 5), Ts_Std(Returns, 20))
-```
 
 ---
 
