@@ -231,7 +231,7 @@ def clip_extreme(x, n_sigma=3):
 ### Installation
 
 ```bash
-git clone https://github.com/yourusername/rimi3.git
+git clone https://github.com/alexandra798/rimi3.git
 cd rimi3
 pip install -r requirements.txt
 ```
@@ -292,15 +292,6 @@ This project builds upon foundational work in:
 
 ---
 
-## 🔮 Future Work
-
-- [ ] **Multi-Asset Extension**: Extend DSL to support cross-asset signals
-- [ ] **Transaction Cost Modeling**: Integrate market impact models into reward
-- [ ] **Online Learning**: Adapt factors to regime changes in real-time
-- [ ] **Interpretability Module**: SHAP-based factor attribution
-
----
-
 ## 📄 License
 
 This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
@@ -310,9 +301,3 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) for deta
 ## ⚠️ Disclaimer
 
 This project is for **educational and research purposes only**. It does not constitute investment advice. Quantitative trading involves substantial risk of loss. Past performance (including simulated results) does not guarantee future results.
-
----
-
-<p align="center">
-  <i>Built with ❤️ for the quantitative finance research community</i>
-</p>
