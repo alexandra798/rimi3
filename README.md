@@ -60,10 +60,10 @@ $$\text{IC}_t = \text{Spearman}\big(\text{Factor}_t, \text{Return}_{t+1:t+k}\big
 
 ### Factor Library Statistics
 
-<p align="center">
-  <img src="docs/images/7_summary_stats.png" alt="Summary Statistics" width="90%"/>
-</p>
 
+<p align="center">
+  <img width="4819" height="1468" alt="7_summary_stats" src="https://github.com/user-attachments/assets/6d443930-9d9b-4512-a633-e9c2f43742d6" />
+</p>
 ---
 
 ## 📈 Visualizations
